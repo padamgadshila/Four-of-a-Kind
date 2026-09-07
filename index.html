@@ -96,6 +96,33 @@
   }
   input[type=text]#nameInput { text-transform: none; letter-spacing: normal; text-align: left; }
 
+  select {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 2px solid var(--wood);
+    background: var(--cream);
+    color: var(--ink);
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+  }
+  select:focus { outline: 3px solid var(--gold); outline-offset: 2px; }
+
+  .settings-box {
+    background: rgba(0,0,0,0.18);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+  }
+  .settings-box .settings-title { font-family: 'Baloo 2'; font-weight: 700; font-size: 0.95rem; color: var(--gold); }
+  .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .settings-row label { margin-bottom: 0; flex: 1; }
+  .settings-row select { width: auto; min-width: 84px; }
+
   .btn {
     font-family: 'Baloo 2', sans-serif;
     font-weight: 700;
@@ -236,6 +263,8 @@
   .standing-row.p1 { background: linear-gradient(90deg, rgba(224,171,63,0.35), rgba(0,0,0,0.15)); }
   .standing-row.p2 { background: linear-gradient(90deg, rgba(200,200,210,0.25), rgba(0,0,0,0.15)); }
   .standing-row.p3 { background: linear-gradient(90deg, rgba(180,110,60,0.25), rgba(0,0,0,0.15)); }
+  .standing-row .score { margin-left: auto; font-family: 'Baloo 2'; color: var(--gold); }
+  .standing-row .round-place { font-size: 0.75rem; color: var(--cream-dim); font-weight: 500; }
 
   .status-line { font-size: 0.8rem; color: var(--cream-dim); text-align: center; }
   .footer-note { font-size: 0.75rem; color: rgba(246,236,217,0.5); text-align: center; margin-top: 8px; }
@@ -271,6 +300,14 @@
     <div class="panel stack">
       <div class="player-list" id="lobbyPlayers"></div>
     </div>
+    <div id="lobbySettingsHost" class="settings-box" style="display:none;">
+      <div class="settings-title">Game settings</div>
+      <div class="settings-row">
+        <label for="cardsPerHandSelect" style="margin-bottom:0;">Cards per hand</label>
+        <select id="cardsPerHandSelect"></select>
+      </div>
+    </div>
+    <div id="lobbySettingsView" class="hint" style="display:none;"></div>
     <div id="lobbyHostControls" class="stack" style="display:none;">
       <button class="btn btn-gold" id="btnStart" disabled>Start game (need 3+)</button>
     </div>
@@ -295,12 +332,30 @@
 
   <!-- RESULTS SCREEN -->
   <section id="screen-results" class="screen">
-    <div class="title">🏆 Final standings</div>
+    <div class="title" id="resultsTitle">🏆 Round standings</div>
     <div class="standings" id="standingsList"></div>
-    <div id="resultsHostControls" style="width:100%; display:none;">
-      <button class="btn btn-gold" id="btnPlayAgain">Play again</button>
+    <div id="resultsHostControls" class="stack" style="width:100%; display:none;">
+      <div class="settings-box">
+        <div class="settings-title">Next round settings</div>
+        <div class="settings-row">
+          <label for="cardsPerHandSelectResults" style="margin-bottom:0;">Cards per hand</label>
+          <select id="cardsPerHandSelectResults"></select>
+        </div>
+      </div>
+      <button class="btn btn-gold" id="btnPlayAgain">Next round</button>
+      <button class="btn btn-ghost" id="btnEndGame">End game for everyone</button>
     </div>
-    <div id="resultsWaitMsg" class="hint">Waiting for the host to start a new round…</div>
+    <div id="resultsWaitMsg" class="hint">Waiting for the host to start the next round…</div>
+  </section>
+
+  <!-- ENDED SCREEN -->
+  <section id="screen-ended" class="screen">
+    <div class="title">🏁 Game over</div>
+    <div class="standings" id="finalScoresList"></div>
+    <div id="endedHostControls" style="width:100%; display:none;">
+      <button class="btn btn-gold" id="btnNewGame">Start a new game</button>
+    </div>
+    <div id="endedWaitMsg" class="hint">Thanks for playing!</div>
   </section>
 
   <div class="toast" id="sentToast"></div>
@@ -311,8 +366,8 @@
 <script>
 // ====================================================================
 // Convex deployment powering this game (see convex/game.ts for the
-// createRoom / joinRoom / startGame / passCard / claimSlap functions).
-// Change this if you deploy to a different Convex project.
+// createRoom / joinRoom / startGame / passCard / claimSlap / endGame /
+// newGame functions). Change this if you deploy to a different project.
 // ====================================================================
 const CONVEX_URL = "https://adamant-dogfish-103.convex.cloud";
 const client = new convex.ConvexClient(CONVEX_URL);
@@ -320,6 +375,8 @@ const api = convex.anyApi;
 
 const MIN_PLAYERS = 3;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
+const CARDS_PER_HAND_OPTIONS = [3, 4, 5, 6, 7, 8];
+const DEFAULT_CARDS_PER_HAND = 4;
 
 const myState = {
   name: '',
@@ -359,6 +416,13 @@ function showToast(message, durationMs = 2200) {
   toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), durationMs);
+}
+
+function populateCardsPerHandSelect(selectEl, currentValue) {
+  selectEl.innerHTML = CARDS_PER_HAND_OPTIONS
+    .map(n => `<option value="${n}">${n} cards</option>`)
+    .join('');
+  selectEl.value = String(currentValue || DEFAULT_CARDS_PER_HAND);
 }
 
 // ---------- join / create ----------
@@ -435,6 +499,9 @@ function renderUI(room) {
   } else if (room.phase === 'RESULTS') {
     showScreen('results');
     renderResults(room);
+  } else if (room.phase === 'ENDED') {
+    showScreen('ended');
+    renderEnded(room);
   }
 }
 
@@ -449,9 +516,18 @@ function renderLobby(room) {
     list.appendChild(row);
   });
 
+  const cardsPerHand = room.cardsPerHand || DEFAULT_CARDS_PER_HAND;
   const hostControls = els('lobbyHostControls');
   const waitMsg = els('lobbyWaitMsg');
+  const settingsHost = els('lobbySettingsHost');
+  const settingsView = els('lobbySettingsView');
+
   if (myState.isHost) {
+    settingsHost.style.display = 'flex';
+    settingsView.style.display = 'none';
+    const select = els('cardsPerHandSelect');
+    if (document.activeElement !== select) populateCardsPerHandSelect(select, cardsPerHand);
+
     hostControls.style.display = 'flex';
     waitMsg.style.display = 'none';
     const btn = els('btnStart');
@@ -459,6 +535,10 @@ function renderLobby(room) {
     btn.disabled = !enough;
     btn.textContent = enough ? `Start game (${room.players.length} players)` : `Start game (need ${MIN_PLAYERS}+)`;
   } else {
+    settingsHost.style.display = 'none';
+    settingsView.style.display = 'block';
+    settingsView.textContent = `Playing with ${cardsPerHand} cards per hand.`;
+
     hostControls.style.display = 'none';
     waitMsg.style.display = 'block';
   }
@@ -466,8 +546,9 @@ function renderLobby(room) {
 
 async function handleStartGame() {
   if (!myState.isHost) return;
+  const cardsPerHand = parseInt(els('cardsPerHandSelect').value, 10) || DEFAULT_CARDS_PER_HAND;
   try {
-    await client.mutation(api.game.startGame, { code: myState.roomCode });
+    await client.mutation(api.game.startGame, { code: myState.roomCode, cardsPerHand });
   } catch (err) {
     showToast(err.message || "Couldn't start the game", 3000);
   }
@@ -557,9 +638,10 @@ function renderGame(room) {
     slapBtn.classList.remove('ready', 'scramble');
   }
 
+  const roundLabel = room.roundNumber ? `Round ${room.roundNumber} • ` : '';
   els('gameStatus').textContent = room.standings.length > 0
-    ? `${room.standings.length}/${room.players.length} players have slapped`
-    : '';
+    ? `${roundLabel}${room.standings.length}/${room.players.length} players have slapped`
+    : `${roundLabel}${room.cardsPerHand || DEFAULT_CARDS_PER_HAND} cards per hand`;
 }
 
 async function handlePassCard(cardIndex) {
@@ -588,28 +670,83 @@ async function handleSlap() {
   }
 }
 
-function renderResults(room) {
-  const list = els('standingsList');
-  list.innerHTML = '';
+function renderStandingsInto(listEl, standings, totalScores, { showRoundPlace }) {
+  listEl.innerHTML = '';
   const medal = { 1: '🥇', 2: '🥈', 3: '🥉' };
-  room.standings.forEach((name, idx) => {
+  standings.forEach((name, idx) => {
     const rank = idx + 1;
+    const total = (totalScores && totalScores[name]) || 0;
     const row = document.createElement('div');
     row.className = 'standing-row' + (rank <= 3 ? ' p' + rank : '');
-    row.innerHTML = `<span class="place">${medal[rank] || '#' + rank}</span><span>${escapeHtml(name)}${name === myState.name ? ' (you)' : ''}</span>`;
-    list.appendChild(row);
+    const placeHtml = `<span class="place">${medal[rank] || '#' + rank}</span>`;
+    const nameHtml = `<span>${escapeHtml(name)}${name === myState.name ? ' (you)' : ''}` +
+      (showRoundPlace ? ` <span class="round-place">round #${rank}</span>` : '') + `</span>`;
+    row.innerHTML = placeHtml + nameHtml + `<span class="score">${total} pt${total === 1 ? '' : 's'}</span>`;
+    listEl.appendChild(row);
   });
+}
 
-  els('resultsHostControls').style.display = myState.isHost ? 'block' : 'none';
-  els('resultsWaitMsg').style.display = myState.isHost ? 'none' : 'block';
+function renderResults(room) {
+  els('resultsTitle').textContent = `🏆 Round ${room.roundNumber || ''} standings`.trim();
+  renderStandingsInto(els('standingsList'), room.standings, room.totalScores, { showRoundPlace: false });
+
+  const hostControls = els('resultsHostControls');
+  const waitMsg = els('resultsWaitMsg');
+  if (myState.isHost) {
+    hostControls.style.display = 'flex';
+    waitMsg.style.display = 'none';
+    populateCardsPerHandSelect(els('cardsPerHandSelectResults'), room.cardsPerHand || DEFAULT_CARDS_PER_HAND);
+  } else {
+    hostControls.style.display = 'none';
+    waitMsg.style.display = 'block';
+  }
 }
 
 async function handlePlayAgain() {
   if (!myState.isHost) return;
+  const cardsPerHand = parseInt(els('cardsPerHandSelectResults').value, 10) || DEFAULT_CARDS_PER_HAND;
   try {
-    await client.mutation(api.game.startGame, { code: myState.roomCode });
+    await client.mutation(api.game.startGame, { code: myState.roomCode, cardsPerHand });
   } catch (err) {
     showToast(err.message || "Couldn't start a new round", 3000);
+  }
+}
+
+async function handleEndGame() {
+  if (!myState.isHost) return;
+  try {
+    await client.mutation(api.game.endGame, { code: myState.roomCode });
+  } catch (err) {
+    showToast(err.message || "Couldn't end the game", 3000);
+  }
+}
+
+function renderEnded(room) {
+  // Lowest cumulative total wins (golf-style scoring).
+  const ranked = Object.entries(room.totalScores || {}).sort((a, b) => a[1] - b[1]);
+  const orderedNames = ranked.map(([name]) => name);
+  // Include anyone with no score yet (shouldn't normally happen) at the end.
+  room.players.forEach(p => { if (!orderedNames.includes(p.name)) orderedNames.push(p.name); });
+
+  renderStandingsInto(els('finalScoresList'), orderedNames, room.totalScores, { showRoundPlace: false });
+
+  const hostControls = els('endedHostControls');
+  const waitMsg = els('endedWaitMsg');
+  if (myState.isHost) {
+    hostControls.style.display = 'block';
+    waitMsg.style.display = 'none';
+  } else {
+    hostControls.style.display = 'none';
+    waitMsg.style.display = 'block';
+  }
+}
+
+async function handleNewGame() {
+  if (!myState.isHost) return;
+  try {
+    await client.mutation(api.game.newGame, { code: myState.roomCode });
+  } catch (err) {
+    showToast(err.message || "Couldn't start a new game", 3000);
   }
 }
 
@@ -619,6 +756,8 @@ els('btnJoin').addEventListener('click', handleJoinRoom);
 els('btnStart').addEventListener('click', handleStartGame);
 els('btnSlap').addEventListener('click', handleSlap);
 els('btnPlayAgain').addEventListener('click', handlePlayAgain);
+els('btnEndGame').addEventListener('click', handleEndGame);
+els('btnNewGame').addEventListener('click', handleNewGame);
 </script>
 </body>
 </html>
