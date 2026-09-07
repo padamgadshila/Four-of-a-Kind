@@ -364,7 +364,29 @@ function shuffle(arr) {
 function connectToRoom(roomId, isHost) {
   state.roomId = roomId;
   state.isHost = isHost;
-  state.room = joinRoom({ appId: APP_ID }, roomId);
+  state.room = joinRoom({
+    appId: APP_ID,
+    // Default Trystero config only offers STUN, which fails silently on
+    // stricter NATs/firewalls (school/office wifi, some carriers). This
+    // free relay is used as a fallback so a direct connection isn't required.
+    turnConfig: [
+      {
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ],
+    callbacks: {
+      onJoinError: (details) => {
+        console.error('[trystero] join error', details);
+        if (!isHost) scheduleJoinRetry(roomId, 'A connection error occurred.');
+      }
+    }
+  }, roomId);
 
   const room = state.room;
   actions.hello = room.makeAction('hello');
@@ -378,6 +400,8 @@ function connectToRoom(roomId, isHost) {
   actions.rankAssigned = room.makeAction('rankAssigned');
   actions.gameOver = room.makeAction('gameOver');
   actions.playAgain = room.makeAction('playAgain');
+  actions.playersUpdated = room.makeAction('playersUpdated');
+  actions.gameAborted = room.makeAction('gameAborted');
 
   if (isHost) {
     state.players = [{ id: selfId, name: state.name, seat: 0 }];
@@ -397,7 +421,12 @@ function connectToRoom(roomId, isHost) {
       broadcastRoster();
       renderLobby();
     }
-    // mid-game disconnects aren't recovered from in this version — known limitation.
+    if (isHost && state.screen === 'game') {
+      hostHandlePlayerLeftMidGame(peerId);
+    }
+    if (!isHost && state.screen !== 'join' && peerId === hostPeerId()) {
+      handleHostLeft();
+    }
   };
 
   actions.hello.onMessage = (data, { peerId }) => {
@@ -411,6 +440,7 @@ function connectToRoom(roomId, isHost) {
 
   actions.roster.onMessage = (data) => {
     if (isHost) return;
+    markJoinConnected();
     state.players = data.players;
     renderLobby();
   };
@@ -419,10 +449,34 @@ function connectToRoom(roomId, isHost) {
     if (isHost) return;
     state.players = data.players;
     state.currentTurn = data.currentTurn;
+    state.hand = [];
+    state.incoming = null;
+    state.outgoingBusy = false;
     state.standings = {};
     state.roundCalled = false;
     state.claimed = false;
     beginGameUI();
+  };
+
+  actions.playersUpdated.onMessage = (data) => {
+    if (isHost) return;
+    state.players = data.players;
+    state.standings = data.standings;
+    if (state.screen === 'game') renderGame();
+  };
+
+  actions.gameAborted.onMessage = (data) => {
+    if (isHost) return;
+    state.hand = [];
+    state.incoming = null;
+    state.outgoingBusy = false;
+    state.currentTurn = null;
+    state.standings = {};
+    state.roundCalled = false;
+    state.claimed = false;
+    showToast(data.reason, 4000);
+    renderLobby();
+    showScreen('lobby');
   };
 
   actions.deal.onMessage = (data) => {
@@ -473,6 +527,62 @@ function broadcastRoster() {
   actions.roster.send({ players: state.players });
 }
 
+// ---------- join reliability: auto-retry until we actually hear from a host ----------
+let joinRetryTimer = null;
+let joinAttempt = 0;
+let joinRoomIdInProgress = null;
+
+function attemptJoin(roomId) {
+  joinRoomIdInProgress = roomId;
+  joinAttempt = 1;
+  els('lobbyPlayers').innerHTML = '';
+  updateConnectingUI();
+  connectToRoom(roomId, false);
+  wireHostSlapListener();
+  armJoinTimeout(roomId);
+}
+
+function armJoinTimeout(roomId) {
+  clearTimeout(joinRetryTimer);
+  // back off a bit on each retry so we don't hammer the signaling server,
+  // but never give up on our own — keep trying until we connect.
+  const timeoutMs = Math.min(6000 + (joinAttempt - 1) * 2500, 15000);
+  joinRetryTimer = setTimeout(() => {
+    if (state.isHost || state.screen !== 'lobby') return; // left this flow already
+    if (state.players.length > 0) return; // we did connect, nothing to do
+    scheduleJoinRetry(roomId, null);
+  }, timeoutMs);
+}
+
+function scheduleJoinRetry(roomId, reasonNote) {
+  if (roomId !== joinRoomIdInProgress) return; // stale timer from an old attempt
+  try { state.room && state.room.leave && state.room.leave(); } catch (e) { /* ignore */ }
+  joinAttempt += 1;
+  updateConnectingUI(reasonNote);
+  connectToRoom(roomId, false);
+  wireHostSlapListener();
+  armJoinTimeout(roomId);
+}
+
+function updateConnectingUI(reasonNote) {
+  const msg = els('lobbyWaitMsg');
+  if (!msg) return;
+  if (joinAttempt <= 1) {
+    msg.textContent = 'Connecting to the host…';
+  } else if (joinAttempt <= 4) {
+    msg.textContent = `Still connecting… retrying (attempt ${joinAttempt}).`;
+  } else {
+    msg.textContent = `Still trying to connect (attempt ${joinAttempt})… this can take longer on some networks, but we'll keep retrying.`;
+  }
+}
+
+function markJoinConnected() {
+  clearTimeout(joinRetryTimer);
+  joinRoomIdInProgress = null;
+  const msg = els('lobbyWaitMsg');
+  if (msg) msg.textContent = 'Waiting for the host to start the game…';
+}
+
 // Called on the RECEIVING peer when someone tries to pass me a card.
 function handlePassRequest(data) {
   if (state.incoming !== null) return false; // my hands are full, try again later
@@ -495,6 +605,9 @@ function hostBuildDeckAndDeal() {
 
   const hands = {};
   state.players.forEach(p => { hands[p.id] = deck.splice(0, 4); });
+
+  state.incoming = null;
+  state.outgoingBusy = false;
 
   state.players.forEach(p => {
     if (p.id === selfId) {
@@ -524,12 +637,15 @@ function rightNeighborId() {
 
 // ---------- gameplay actions (any player) ----------
 let toastTimer = null;
-function showSentToast(name) {
+function showToast(message, durationMs = 1800) {
   const toast = els('sentToast');
-  toast.textContent = `✅ Sent to ${name}`;
+  toast.textContent = message;
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), durationMs);
+}
+function showSentToast(name) {
+  showToast(`✅ Sent to ${name}`);
 }
 
 function tryPassCard(card, targetName) {
@@ -610,17 +726,24 @@ function hostHandleSlap(peerId, name) {
   const rankedCount = Object.keys(state.standings).length;
 
   if (rankedCount === total - 1) {
-    const last = state.players.find(p => state.standings[p.id] === undefined);
-    if (last) {
-      const lastRank = state.nextRank++;
-      state.standings[last.id] = lastRank;
-      actions.rankAssigned.send({ peerId: last.id, rank: lastRank });
-      if (last.id === selfId) renderGame();
-    }
-    finishGame();
+    autoFinishLastPlayer();
   } else if (rankedCount >= total) {
     finishGame();
   }
+}
+
+// Awards the one remaining unranked player their placement automatically —
+// used both when everyone else has already been ranked, and when a
+// mid-game disconnect leaves exactly one active player standing.
+function autoFinishLastPlayer() {
+  const last = state.players.find(p => state.standings[p.id] === undefined);
+  if (last) {
+    const lastRank = state.nextRank++;
+    state.standings[last.id] = lastRank;
+    actions.rankAssigned.send({ peerId: last.id, rank: lastRank });
+    if (last.id === selfId) renderGame();
+  }
+  finishGame();
 }
 
 function finishGame() {
@@ -629,6 +752,87 @@ function finishGame() {
     .sort((a, b) => a.rank - b.rank);
   actions.gameOver.send({ standings });
   renderResults(standings);
+}
+
+// Keeps rank numbers contiguous (1, 2, 3…) after a ranked player is removed
+// from the game (e.g. they disconnect after already finishing).
+function renumberStandings() {
+  const entries = Object.entries(state.standings).sort((a, b) => a[1] - b[1]);
+  const newStandings = {};
+  entries.forEach(([id], idx) => { newStandings[id] = idx + 1; });
+  state.standings = newStandings;
+  state.nextRank = entries.length + 1;
+}
+
+// ---------- host: mid-game disconnect handling ----------
+function hostHandlePlayerLeftMidGame(peerId) {
+  const leavingPlayer = state.players.find(p => p.id === peerId);
+  if (!leavingPlayer) return;
+
+  const wasRanked = state.standings[peerId] !== undefined;
+  state.players = state.players.filter(p => p.id !== peerId);
+  delete state.standings[peerId];
+  // reseat everyone contiguously (0..n-1) so right-neighbor passing stays correct
+  state.players.forEach((p, i) => { p.seat = i; });
+
+  if (state.players.length < MIN_PLAYERS) {
+    const reason = `${leavingPlayer.name} left — not enough players to continue. Back to the lobby.`;
+    showToast(reason, 4000);
+    actions.gameAborted.send({ reason });
+    state.hand = [];
+    state.incoming = null;
+    state.outgoingBusy = false;
+    state.currentTurn = null;
+    state.standings = {};
+    state.roundCalled = false;
+    state.claimed = false;
+    renderLobby();
+    showScreen('lobby');
+    return;
+  }
+
+  if (wasRanked) {
+    renumberStandings();
+    actions.playersUpdated.send({ players: state.players, standings: state.standings });
+    renderGame();
+    const rankedCount = Object.keys(state.standings).length;
+    if (rankedCount === state.players.length - 1) autoFinishLastPlayer();
+    else if (rankedCount >= state.players.length) finishGame();
+    return;
+  }
+
+  if (state.roundCalled) {
+    // Mid-race: the leaving player simply forfeits their placement.
+    showToast(`${leavingPlayer.name} left the game.`, 2500);
+    actions.playersUpdated.send({ players: state.players, standings: state.standings });
+    renderGame();
+    const rankedCount = Object.keys(state.standings).length;
+    if (rankedCount === state.players.length - 1) autoFinishLastPlayer();
+    else if (rankedCount >= state.players.length) finishGame();
+    return;
+  }
+
+  // Nobody has been ranked yet, so hands are still scattered mid-pass —
+  // the cleanest recovery is a fresh shuffle and deal among who's left.
+  showToast(`${leavingPlayer.name} left — reshuffling the cards…`, 3000);
+  hostBuildDeckAndDeal();
+}
+
+// Non-host: the host's connection dropped. There's no host migration in
+// this version, so send everyone back to start a fresh room rather than
+// leave them stuck waiting on a host that's gone.
+function handleHostLeft() {
+  clearTimeout(joinRetryTimer);
+  state.hand = [];
+  state.incoming = null;
+  state.outgoingBusy = false;
+  state.currentTurn = null;
+  state.standings = {};
+  state.roundCalled = false;
+  state.claimed = false;
+  state.players = [];
+  showToast('Host disconnected — the game has ended.', 4000);
+  showScreen('join');
 }
 
 // host-only: listen for slap claims from non-host peers
@@ -792,10 +996,9 @@ els('btnJoin').addEventListener('click', () => {
   if (!name) { flashJoinError('Type your name first.'); return; }
   if (code.length < 4) { flashJoinError('That room code looks too short.'); return; }
   state.name = name;
-  connectToRoom(code, false);
   showScreen('lobby');
   els('lobbyCode').textContent = code;
-  wireHostSlapListener();
+  attemptJoin(code);
 });
 
 function flashJoinError(msg) {
