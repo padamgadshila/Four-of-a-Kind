@@ -345,7 +345,7 @@ function showScreen(name) {
   els('screen-' + name).classList.add('active');
 }
 
-function randomCode(len = 5) {
+function randomCode(len = 7) {
   let out = '';
   for (let i = 0; i < len; i++) out += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
   return out;
@@ -391,6 +391,7 @@ function connectToRoom(roomId, isHost) {
   const room = state.room;
   actions.hello = room.makeAction('hello');
   actions.roster = room.makeAction('roster');
+  actions.helloAck = room.makeAction('helloAck');
   actions.gameStart = room.makeAction('gameStart');
   actions.deal = room.makeAction('deal');
   actions.turnChanged = room.makeAction('turnChanged');
@@ -431,11 +432,33 @@ function connectToRoom(roomId, isHost) {
 
   actions.hello.onMessage = (data, { peerId }) => {
     if (!isHost) return;
+
+    actions.helloAck.send({}, { target: peerId });
+
     if (state.players.some(p => p.id === peerId)) return;
     if (state.players.length >= MAX_PLAYERS) return;
+
     state.players.push({ id: peerId, name: data.name, seat: state.players.length });
     broadcastRoster();
     renderLobby();
+  };
+
+  let helloConfirmed = false;
+  let helloTimer = null;
+
+  function startHelloLoop() {
+    clearInterval(helloTimer);
+    helloConfirmed = false;
+
+    helloTimer = setInterval(() => {
+      if (helloConfirmed) return;
+      actions.hello.send({ name: state.name });
+    }, 1000);
+  }
+
+  actions.helloAck.onMessage = () => {
+    helloConfirmed = true;
+    clearInterval(helloTimer);
   };
 
   actions.roster.onMessage = (data) => {
@@ -527,6 +550,13 @@ function broadcastRoster() {
   actions.roster.send({ players: state.players });
 }
 
+setInterval(() => {
+  if (!state.isHost || !actions.roster) return;
+  try {
+    broadcastRoster();
+  } catch (e) {}
+}, 5000);
+
 // ---------- join reliability: auto-retry until we actually hear from a host ----------
 let joinRetryTimer = null;
 let joinAttempt = 0;
@@ -538,6 +568,7 @@ function attemptJoin(roomId) {
   els('lobbyPlayers').innerHTML = '';
   updateConnectingUI();
   connectToRoom(roomId, false);
+  startHelloLoop();
   wireHostSlapListener();
   armJoinTimeout(roomId);
 }
@@ -560,6 +591,7 @@ function scheduleJoinRetry(roomId, reasonNote) {
   joinAttempt += 1;
   updateConnectingUI(reasonNote);
   connectToRoom(roomId, false);
+  startHelloLoop();
   wireHostSlapListener();
   armJoinTimeout(roomId);
 }
