@@ -392,6 +392,7 @@ function connectToRoom(roomId, isHost) {
   actions.hello = room.makeAction('hello');
   actions.roster = room.makeAction('roster');
   actions.helloAck = room.makeAction('helloAck');
+  actions.keepAlive = room.makeAction('keepAlive');
   actions.gameStart = room.makeAction('gameStart');
   actions.deal = room.makeAction('deal');
   actions.turnChanged = room.makeAction('turnChanged');
@@ -456,7 +457,19 @@ function connectToRoom(roomId, isHost) {
     }, 1000);
   }
 
-  actions.helloAck.onMessage = () => {
+  
+  // KEEPALIVE
+  actions.keepAlive.onMessage = () => {};
+
+  setInterval(() => {
+    try {
+      if (actions.keepAlive) {
+        actions.keepAlive.send({ ts: Date.now() });
+      }
+    } catch (e) {}
+  }, 10000);
+
+actions.helloAck.onMessage = () => {
     helloConfirmed = true;
     clearInterval(helloTimer);
   };
