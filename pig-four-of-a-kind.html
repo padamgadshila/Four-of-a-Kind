@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Four of a Kind — Pig / Spoons</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --felt-dark: #143d31;
+    --felt: #1f5c4c;
+    --felt-light: #2b7a63;
+    --wood: #6b3f24;
+    --wood-dark: #4a2b18;
+    --cream: #f6ecd9;
+    --cream-dim: #e5d6b8;
+    --ink: #26201a;
+    --red: #e5473a;
+    --red-dark: #b73528;
+    --gold: #e0ab3f;
+    --gold-dark: #a97a1f;
+    --shadow: rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    font-family: 'Inter', system-ui, sans-serif;
+    color: var(--cream);
+    background:
+      radial-gradient(ellipse at 50% -10%, var(--felt-light) 0%, var(--felt) 45%, var(--felt-dark) 100%);
+    background-attachment: fixed;
+  }
+
+  #app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 48px;
+  }
+
+  .screen { width: 100%; max-width: 560px; display: none; flex-direction: column; align-items: center; gap: 18px; }
+  .screen.active { display: flex; }
+
+  h1, h2, h3 { font-family: 'Baloo 2', 'Inter', sans-serif; margin: 0; }
+
+  .title {
+    font-size: 2.1rem;
+    font-weight: 800;
+    text-align: center;
+    color: var(--cream);
+    text-shadow: 0 3px 0 var(--wood-dark);
+    letter-spacing: 0.5px;
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--cream-dim);
+    font-size: 0.95rem;
+    margin-top: -10px;
+    max-width: 420px;
+  }
+
+  .panel {
+    width: 100%;
+    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.12));
+    border: 2px solid rgba(0,0,0,0.25);
+    border-radius: 18px;
+    padding: 22px;
+    box-shadow: 0 10px 24px var(--shadow), inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+
+  label { font-size: 0.85rem; color: var(--cream-dim); display: block; margin-bottom: 6px; font-weight: 600; }
+
+  input[type=text] {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 2px solid var(--wood);
+    background: var(--cream);
+    color: var(--ink);
+    font-size: 1.05rem;
+    font-weight: 600;
+    text-align: center;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  input[type=text]:focus, button:focus-visible {
+    outline: 3px solid var(--gold);
+    outline-offset: 2px;
+  }
+  input[type=text]#nameInput { text-transform: none; letter-spacing: normal; text-align: left; }
+
+  .btn {
+    font-family: 'Baloo 2', sans-serif;
+    font-weight: 700;
+    font-size: 1.05rem;
+    padding: 14px 20px;
+    border-radius: 12px;
+    border: none;
+    cursor: pointer;
+    color: var(--cream);
+    background: linear-gradient(180deg, var(--wood) 0%, var(--wood-dark) 100%);
+    box-shadow: 0 4px 0 #2f1a0e, 0 6px 12px var(--shadow);
+    transition: transform 0.08s ease;
+    width: 100%;
+  }
+  .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #2f1a0e; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-gold { background: linear-gradient(180deg, var(--gold) 0%, var(--gold-dark) 100%); color: var(--ink); box-shadow: 0 4px 0 #7a5814, 0 6px 12px var(--shadow); }
+  .btn-ghost { background: transparent; border: 2px solid var(--cream-dim); box-shadow: none; }
+
+  .row { display: flex; gap: 10px; width: 100%; }
+  .row > * { flex: 1; }
+
+  .stack { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+
+  .code-display {
+    font-family: 'Baloo 2', sans-serif;
+    font-size: 2.4rem;
+    letter-spacing: 6px;
+    text-align: center;
+    color: var(--gold);
+    background: rgba(0,0,0,0.25);
+    border-radius: 14px;
+    padding: 14px;
+    border: 2px dashed var(--gold-dark);
+  }
+
+  .player-list { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+  .player-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(0,0,0,0.2); border-radius: 10px; padding: 10px 14px;
+    font-weight: 600;
+  }
+  .player-chip .tag { font-size: 0.75rem; color: var(--gold); font-weight: 700; }
+
+  .hint { font-size: 0.85rem; color: var(--cream-dim); text-align: center; }
+
+  /* ---- Game screen ---- */
+  .table-top { width: 100%; display: flex; flex-direction: column; gap: 16px; align-items: center; }
+
+  .pile-box {
+    display: flex; align-items: center; gap: 14px; justify-content: center;
+    background: rgba(0,0,0,0.2); border-radius: 14px; padding: 12px 18px;
+    width: 100%;
+  }
+  .pile-count { font-family: 'Baloo 2'; font-size: 1.3rem; color: var(--gold); }
+
+  .opponents { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; width: 100%; }
+  .opp-chip {
+    background: rgba(0,0,0,0.22); border-radius: 10px; padding: 8px 12px;
+    font-size: 0.85rem; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    min-width: 74px;
+  }
+  .opp-chip .rank-badge { font-family: 'Baloo 2'; color: var(--gold); font-weight: 700; }
+
+  .hand-area { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
+  .card {
+    width: 76px; height: 104px;
+    background: var(--cream);
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2.4rem;
+    box-shadow: 0 6px 0 rgba(0,0,0,0.25), 0 8px 14px var(--shadow);
+    cursor: pointer;
+    border: 3px solid transparent;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+    user-select: none;
+  }
+  .card:hover { transform: translateY(-6px); }
+  .card.incoming { border-color: var(--gold); animation: pop 0.35s ease; }
+  .card.pending { opacity: 0.4; cursor: default; }
+  .card.pending:hover { transform: none; }
+
+  @keyframes pop { from { transform: scale(0.7) translateY(-16px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
+
+  .slap-wrap { display: flex; justify-content: center; margin: 14px 0; }
+  .slap-btn {
+    width: 150px; height: 150px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #ff6b5c, var(--red) 60%, var(--red-dark) 100%);
+    border: 6px solid #7a1f16;
+    color: white;
+    font-family: 'Baloo 2';
+    font-size: 1.4rem;
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: 0 8px 0 #6e160d, 0 12px 20px var(--shadow);
+    letter-spacing: 1px;
+  }
+  .slap-btn:active { transform: translateY(6px); box-shadow: 0 2px 0 #6e160d; }
+  .slap-btn:disabled { filter: grayscale(0.75); opacity: 0.5; cursor: not-allowed; box-shadow: 0 8px 0 #3a3a3a; }
+  .slap-btn.ready { animation: pulse 1s infinite; }
+  .slap-btn.scramble { animation: pulse 0.4s infinite; background: radial-gradient(circle at 35% 30%, #ffd35c, var(--gold) 55%, var(--gold-dark) 100%); border-color: var(--gold-dark); color: var(--ink); }
+  @media (prefers-reduced-motion: reduce) { .slap-btn.ready, .slap-btn.scramble, .card.incoming { animation: none; } }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+
+  .banner {
+    text-align: center; font-family: 'Baloo 2'; font-weight: 700;
+    padding: 10px 16px; border-radius: 10px; min-height: 20px;
+  }
+  .banner.call { background: var(--gold); color: var(--ink); }
+  .banner.you { background: var(--red); color: white; }
+
+  /* ---- Results ---- */
+  .standings { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+  .standing-row {
+    display: flex; align-items: center; gap: 12px;
+    background: rgba(0,0,0,0.22); border-radius: 12px; padding: 12px 16px;
+    font-weight: 700; font-size: 1.05rem;
+  }
+  .standing-row .place { font-family: 'Baloo 2'; font-size: 1.3rem; width: 40px; text-align: center; }
+  .standing-row.p1 { background: linear-gradient(90deg, rgba(224,171,63,0.35), rgba(0,0,0,0.15)); }
+  .standing-row.p2 { background: linear-gradient(90deg, rgba(200,200,210,0.25), rgba(0,0,0,0.15)); }
+  .standing-row.p3 { background: linear-gradient(90deg, rgba(180,110,60,0.25), rgba(0,0,0,0.15)); }
+
+  .status-line { font-size: 0.8rem; color: var(--cream-dim); text-align: center; }
+  .footer-note { font-size: 0.75rem; color: rgba(246,236,217,0.5); text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- JOIN SCREEN -->
+  <section id="screen-join" class="screen active">
+    <div class="title">🃏 Four of a Kind</div>
+    <div class="subtitle">The Pig / Spoons card game — swap your button for the spoon. Collect four matching chits, then slam the button first.</div>
+    <div class="panel stack">
+      <div>
+        <label for="nameInput">Your name</label>
+        <input type="text" id="nameInput" placeholder="e.g. Paddy" maxlength="16" />
+      </div>
+      <button class="btn btn-gold" id="btnCreate">Create a room</button>
+      <div class="row">
+        <input type="text" id="joinCodeInput" placeholder="ROOM CODE" maxlength="5" />
+        <button class="btn" id="btnJoin" style="flex:0 0 110px;">Join</button>
+      </div>
+    </div>
+    <div id="joinError" class="hint" style="color:#ffb4a8;"></div>
+    <div class="footer-note">Peer-to-peer — no server, no accounts. Everyone needs the same room code.</div>
+  </section>
+
+  <!-- LOBBY SCREEN -->
+  <section id="screen-lobby" class="screen">
+    <div class="title">Room's open</div>
+    <div class="code-display" id="lobbyCode">-----</div>
+    <div class="hint">Send this code to your friends. They tap "Join" and type it in.</div>
+    <div class="panel stack">
+      <div class="player-list" id="lobbyPlayers"></div>
+    </div>
+    <div id="lobbyHostControls" class="stack" style="display:none;">
+      <button class="btn btn-gold" id="btnStart" disabled>Start game (need 3+)</button>
+    </div>
+    <div id="lobbyWaitMsg" class="hint">Waiting for the host to start the game…</div>
+  </section>
+
+  <!-- GAME SCREEN -->
+  <section id="screen-game" class="screen">
+    <div class="table-top">
+      <div class="banner call" id="callBanner" style="display:none;"></div>
+      <div class="pile-box">
+        <div>🂠 Draw pile: <span class="pile-count" id="pileCount">0</span></div>
+        <button class="btn btn-gold" id="btnDraw" style="display:none; width:auto; padding:10px 16px;">Draw card</button>
+      </div>
+      <div class="opponents" id="opponents"></div>
+      <h3 style="align-self:flex-start; margin-top:6px;">Your chits</h3>
+      <div class="hand-area" id="handArea"></div>
+      <div class="hint" id="handHint">Tap a chit to pass it to your right.</div>
+      <div class="slap-wrap">
+        <button class="slap-btn" id="btnSlap" disabled>SLAP!</button>
+      </div>
+      <div class="status-line" id="gameStatus"></div>
+    </div>
+  </section>
+
+  <!-- RESULTS SCREEN -->
+  <section id="screen-results" class="screen">
+    <div class="title">🏆 Final standings</div>
+    <div class="standings" id="standingsList"></div>
+    <div id="resultsHostControls" style="width:100%; display:none;">
+      <button class="btn btn-gold" id="btnPlayAgain">Play again</button>
+    </div>
+    <div id="resultsWaitMsg" class="hint">Waiting for the host to start a new round…</div>
+  </section>
+
+</div>
+
+<script type="module">
+import { joinRoom, selfId } from 'https://esm.run/trystero';
+
+const APP_ID = 'paddy-four-of-a-kind-v1';
+const RANK_EMOJIS = ['🐷','🐸','🐵','🦊','🐼','🐨','🦁','🐯','🐰','🦉'];
+const COPIES_PER_RANK = 6;
+const MIN_PLAYERS = 3;
+const MAX_PLAYERS = 8;
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
+
+// ---------- tiny state ----------
+const state = {
+  screen: 'join',
+  name: '',
+  roomId: null,
+  isHost: false,
+  room: null,
+  players: [],          // [{id, name, seat}] host-authoritative, broadcast to all
+  hand: [],              // my 4 settled cards
+  incoming: null,        // a 5th card waiting on a keep/pass decision
+  outgoingBusy: false,   // currently trying to hand a card to my right neighbor
+  pileCount: 0,
+  pile: [],              // host only
+  standings: {},         // peerId -> rank (client mirror, host-authoritative)
+  roundCalled: false,
+  claimed: false,        // I already sent my slap claim
+  nextRank: 1,           // host only counter
+};
+
+// actions, created once we've joined a room
+let actions = {};
+
+function els(id) { return document.getElementById(id); }
+
+function showScreen(name) {
+  state.screen = name;
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  els('screen-' + name).classList.add('active');
+}
+
+function randomCode(len = 5) {
+  let out = '';
+  for (let i = 0; i < len; i++) out += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  return out;
+}
+
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// ---------- networking setup ----------
+function connectToRoom(roomId, isHost) {
+  state.roomId = roomId;
+  state.isHost = isHost;
+  state.room = joinRoom({ appId: APP_ID }, roomId);
+
+  const room = state.room;
+  actions.hello = room.makeAction('hello');
+  actions.roster = room.makeAction('roster');
+  actions.gameStart = room.makeAction('gameStart');
+  actions.deal = room.makeAction('deal');
+  actions.pileUpdate = room.makeAction('pileUpdate');
+  actions.passCard = room.makeAction('passCard', { kind: 'request', onRequest: handlePassRequest });
+  actions.slapClaim = room.makeAction('slapClaim');
+  actions.roundCalled = room.makeAction('roundCalled');
+  actions.rankAssigned = room.makeAction('rankAssigned');
+  actions.gameOver = room.makeAction('gameOver');
+  actions.playAgain = room.makeAction('playAgain');
+
+  if (isHost) {
+    state.players = [{ id: selfId, name: state.name, seat: 0 }];
+  }
+
+  room.onPeerJoin = peerId => {
+    if (isHost) {
+      actions.roster.send({ players: state.players }, { target: peerId });
+    }
+    // announce myself to the newcomer too, in case they're the host
+    actions.hello.send({ name: state.name }, { target: peerId });
+  };
+
+  room.onPeerLeave = peerId => {
+    if (isHost && state.screen === 'lobby') {
+      state.players = state.players.filter(p => p.id !== peerId);
+      broadcastRoster();
+      renderLobby();
+    }
+    // mid-game disconnects aren't recovered from in this version — known limitation.
+  };
+
+  actions.hello.onMessage = (data, { peerId }) => {
+    if (!isHost) return;
+    if (state.players.some(p => p.id === peerId)) return;
+    if (state.players.length >= MAX_PLAYERS) return;
+    state.players.push({ id: peerId, name: data.name, seat: state.players.length });
+    broadcastRoster();
+    renderLobby();
+  };
+
+  actions.roster.onMessage = (data) => {
+    if (isHost) return;
+    state.players = data.players;
+    renderLobby();
+  };
+
+  actions.gameStart.onMessage = (data) => {
+    if (isHost) return;
+    state.players = data.players;
+    state.pileCount = data.pileCount;
+    state.standings = {};
+    state.roundCalled = false;
+    state.claimed = false;
+    beginGameUI();
+  };
+
+  actions.deal.onMessage = (data) => {
+    state.hand = data.hand;
+    renderGame();
+  };
+
+  actions.pileUpdate.onMessage = (data) => {
+    state.pileCount = data.count;
+    renderGame();
+  };
+
+  actions.roundCalled.onMessage = () => {
+    state.roundCalled = true;
+    renderGame();
+  };
+
+  actions.rankAssigned.onMessage = (data) => {
+    state.standings[data.peerId] = data.rank;
+    if (data.peerId === selfId) state.claimed = true;
+    renderGame();
+  };
+
+  actions.gameOver.onMessage = (data) => {
+    renderResults(data.standings);
+  };
+
+  actions.playAgain.onMessage = (data) => {
+    state.players = data.players;
+    state.hand = [];
+    state.incoming = null;
+    state.outgoingBusy = false;
+    state.standings = {};
+    state.roundCalled = false;
+    state.claimed = false;
+    renderLobby();
+    showScreen('lobby');
+  };
+
+  if (isHost) {
+    renderLobby();
+    showScreen('lobby');
+  }
+}
+
+function broadcastRoster() {
+  actions.roster.send({ players: state.players });
+}
+
+// Called on the RECEIVING peer when someone tries to pass me a card.
+function handlePassRequest(data) {
+  if (state.incoming !== null) return false; // my hands are full, try again later
+  state.incoming = data.card;
+  renderGame();
+  return true;
+}
+
+// ---------- host: game setup ----------
+function hostBuildDeckAndDeal() {
+  const n = state.players.length;
+  const ranks = RANK_EMOJIS.slice(0, n);
+  let deck = [];
+  ranks.forEach(r => { for (let i = 0; i < COPIES_PER_RANK; i++) deck.push(r); });
+  deck = shuffle(deck);
+
+  const hands = {};
+  state.players.forEach(p => { hands[p.id] = deck.splice(0, 4); });
+  state.pile = deck; // whatever's left is the draw pile
+
+  state.players.forEach(p => {
+    if (p.id === selfId) {
+      state.hand = hands[p.id];
+    } else {
+      actions.deal.send({ hand: hands[p.id] }, { target: p.id });
+    }
+  });
+
+  state.pileCount = state.pile.length;
+  state.standings = {};
+  state.roundCalled = false;
+  state.claimed = false;
+  state.nextRank = 1;
+
+  actions.gameStart.send({ players: state.players, pileCount: state.pileCount });
+  beginGameUI();
+}
+
+function seatOf(peerId) { return state.players.find(p => p.id === peerId)?.seat ?? 0; }
+function rightNeighborId() {
+  const n = state.players.length;
+  const mySeat = seatOf(selfId);
+  const nextSeat = (mySeat + 1) % n;
+  return state.players.find(p => p.seat === nextSeat)?.id;
+}
+
+// ---------- gameplay actions (any player) ----------
+function tryPassCard(card) {
+  state.outgoingBusy = true;
+  renderGame();
+  const target = rightNeighborId();
+
+  const attempt = () => {
+    actions.passCard.request({ card }, { target, timeoutMs: 1500 })
+      .then(accepted => {
+        if (accepted) {
+          state.outgoingBusy = false;
+          renderGame();
+        } else {
+          setTimeout(attempt, 250);
+        }
+      })
+      .catch(() => setTimeout(attempt, 350));
+  };
+  attempt();
+}
+
+function onCardClick(index) {
+  if (state.outgoingBusy) return;
+  const fiveCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand.slice();
+  const chosen = fiveCards[index];
+  fiveCards.splice(index, 1);
+  state.hand = fiveCards;
+  state.incoming = null;
+  renderGame();
+  tryPassCard(chosen);
+}
+
+function onDrawClick() {
+  if (state.incoming !== null || state.outgoingBusy) return;
+  if (state.pile.length === 0) return;
+  state.incoming = state.pile.shift();
+  state.pileCount = state.pile.length;
+  actions.pileUpdate.send({ count: state.pileCount });
+  renderGame();
+}
+
+function handHasFourOfKind() {
+  if (state.hand.length < 4) return false;
+  return state.hand.every(c => c === state.hand[0]);
+}
+
+function onSlapClick() {
+  if (state.claimed) return;
+  if (!state.roundCalled && !handHasFourOfKind()) return;
+  state.claimed = true; // optimistic lock so we can't double-fire
+  renderGame();
+  if (state.isHost) {
+    hostHandleSlap(selfId, state.name);
+  } else {
+    actions.slapClaim.send({ name: state.name }, { target: hostPeerId() });
+  }
+}
+
+function hostPeerId() {
+  return state.players.find(p => p.seat === 0)?.id;
+}
+
+// ---------- host: slap arbitration ----------
+function hostHandleSlap(peerId, name) {
+  if (state.standings[peerId] !== undefined) return;
+
+  if (!state.roundCalled) {
+    state.roundCalled = true;
+    actions.roundCalled.send({});
+  }
+
+  const rank = state.nextRank++;
+  state.standings[peerId] = rank;
+  actions.rankAssigned.send({ peerId, rank });
+  if (peerId === selfId) renderGame();
+
+  const total = state.players.length;
+  const rankedCount = Object.keys(state.standings).length;
+
+  if (rankedCount === total - 1) {
+    const last = state.players.find(p => state.standings[p.id] === undefined);
+    if (last) {
+      const lastRank = state.nextRank++;
+      state.standings[last.id] = lastRank;
+      actions.rankAssigned.send({ peerId: last.id, rank: lastRank });
+      if (last.id === selfId) renderGame();
+    }
+    finishGame();
+  } else if (rankedCount >= total) {
+    finishGame();
+  }
+}
+
+function finishGame() {
+  const standings = state.players
+    .map(p => ({ id: p.id, name: p.name, rank: state.standings[p.id] }))
+    .sort((a, b) => a.rank - b.rank);
+  actions.gameOver.send({ standings });
+  renderResults(standings);
+}
+
+// host-only: listen for slap claims from non-host peers
+function wireHostSlapListener() {
+  actions.slapClaim.onMessage = (data, { peerId }) => {
+    if (!state.isHost) return;
+    hostHandleSlap(peerId, data.name);
+  };
+}
+
+// ---------- rendering ----------
+function renderLobby() {
+  els('lobbyCode').textContent = state.roomId;
+  const list = els('lobbyPlayers');
+  list.innerHTML = '';
+  state.players.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'player-chip';
+    row.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (p.seat === 0 ? '<span class="tag">HOST</span>' : '');
+    list.appendChild(row);
+  });
+
+  const hostControls = els('lobbyHostControls');
+  const waitMsg = els('lobbyWaitMsg');
+  if (state.isHost) {
+    hostControls.style.display = 'flex';
+    waitMsg.style.display = 'none';
+    const btn = els('btnStart');
+    const enough = state.players.length >= MIN_PLAYERS;
+    btn.disabled = !enough;
+    btn.textContent = enough ? `Start game (${state.players.length} players)` : `Start game (need ${MIN_PLAYERS}+)`;
+  } else {
+    hostControls.style.display = 'none';
+    waitMsg.style.display = 'block';
+  }
+}
+
+function beginGameUI() {
+  showScreen('game');
+  renderGame();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderGame() {
+  els('pileCount').textContent = state.pileCount;
+  els('btnDraw').style.display = state.isHost ? 'inline-block' : 'none';
+  els('btnDraw').disabled = state.incoming !== null || state.outgoingBusy || state.pileCount === 0;
+
+  const opp = els('opponents');
+  opp.innerHTML = '';
+  state.players.filter(p => p.id !== selfId).forEach(p => {
+    const chip = document.createElement('div');
+    chip.className = 'opp-chip';
+    const rank = state.standings[p.id];
+    chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rank ? `<span class="rank-badge">#${rank}</span>` : '<span>🎴 in play</span>');
+    opp.appendChild(chip);
+  });
+
+  const handArea = els('handArea');
+  handArea.innerHTML = '';
+  const displayCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand;
+  displayCards.forEach((card, i) => {
+    const div = document.createElement('div');
+    const isNew = state.incoming !== null && i === displayCards.length - 1;
+    div.className = 'card' + (isNew ? ' incoming' : '') + (state.outgoingBusy ? ' pending' : '');
+    div.textContent = card;
+    div.onclick = () => onCardClick(i);
+    handArea.appendChild(div);
+  });
+
+  els('handHint').textContent = state.outgoingBusy
+    ? 'Sending your chit along… waiting for space on the other side.'
+    : (state.incoming !== null ? 'New chit arrived — tap ANY chit to pass it right.' : 'Waiting for your next chit.');
+
+  const callBanner = els('callBanner');
+  if (state.roundCalled && !state.claimed) {
+    callBanner.style.display = 'block';
+    callBanner.textContent = '🚨 Someone got four! SLAM the button now!';
+  } else {
+    callBanner.style.display = 'none';
+  }
+
+  const slapBtn = els('btnSlap');
+  const myRank = state.standings[selfId];
+  if (myRank) {
+    slapBtn.disabled = true;
+    slapBtn.textContent = `You're #${myRank}!`;
+    slapBtn.classList.remove('ready', 'scramble');
+  } else if (state.claimed) {
+    slapBtn.disabled = true;
+    slapBtn.textContent = 'Claim sent…';
+    slapBtn.classList.remove('ready', 'scramble');
+  } else if (state.roundCalled) {
+    slapBtn.disabled = false;
+    slapBtn.textContent = 'SLAP!';
+    slapBtn.classList.add('scramble');
+    slapBtn.classList.remove('ready');
+  } else if (handHasFourOfKind()) {
+    slapBtn.disabled = false;
+    slapBtn.textContent = 'SLAP!';
+    slapBtn.classList.add('ready');
+    slapBtn.classList.remove('scramble');
+  } else {
+    slapBtn.disabled = true;
+    slapBtn.textContent = 'SLAP!';
+    slapBtn.classList.remove('ready', 'scramble');
+  }
+
+  els('gameStatus').textContent = state.isHost ? 'You are the dealer — use Draw to feed new chits into the game.' : '';
+}
+
+function renderResults(standings) {
+  showScreen('results');
+  const list = els('standingsList');
+  list.innerHTML = '';
+  const medal = { 1: '🥇', 2: '🥈', 3: '🥉' };
+  standings.forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'standing-row' + (s.rank <= 3 ? ' p' + s.rank : '');
+    row.innerHTML = `<span class="place">${medal[s.rank] || '#' + s.rank}</span><span>${escapeHtml(s.name)}${s.id === selfId ? ' (you)' : ''}</span>`;
+    list.appendChild(row);
+  });
+
+  els('resultsHostControls').style.display = state.isHost ? 'block' : 'none';
+  els('resultsWaitMsg').style.display = state.isHost ? 'none' : 'block';
+}
+
+// ---------- UI wiring ----------
+els('btnCreate').addEventListener('click', () => {
+  const name = els('nameInput').value.trim();
+  if (!name) { flashJoinError('Type your name first.'); return; }
+  state.name = name;
+  const code = randomCode();
+  connectToRoom(code, true);
+  wireHostSlapListener();
+});
+
+els('btnJoin').addEventListener('click', () => {
+  const name = els('nameInput').value.trim();
+  const code = els('joinCodeInput').value.trim().toUpperCase();
+  if (!name) { flashJoinError('Type your name first.'); return; }
+  if (code.length < 4) { flashJoinError('That room code looks too short.'); return; }
+  state.name = name;
+  connectToRoom(code, false);
+  showScreen('lobby');
+  els('lobbyCode').textContent = code;
+  wireHostSlapListener();
+});
+
+function flashJoinError(msg) {
+  els('joinError').textContent = msg;
+  setTimeout(() => { els('joinError').textContent = ''; }, 2500);
+}
+
+els('btnStart').addEventListener('click', () => {
+  if (!state.isHost) return;
+  hostBuildDeckAndDeal();
+});
+
+els('btnDraw').addEventListener('click', onDrawClick);
+els('btnSlap').addEventListener('click', onSlapClick);
+
+els('btnPlayAgain').addEventListener('click', () => {
+  if (!state.isHost) return;
+  state.hand = [];
+  state.incoming = null;
+  state.outgoingBusy = false;
+  actions.playAgain.send({ players: state.players });
+  renderLobby();
+  showScreen('lobby');
+});
+</script>
+</body>
+</html>
