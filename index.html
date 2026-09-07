@@ -145,13 +145,6 @@
   /* ---- Game screen ---- */
   .table-top { width: 100%; display: flex; flex-direction: column; gap: 16px; align-items: center; }
 
-  .pile-box {
-    display: flex; align-items: center; gap: 14px; justify-content: center;
-    background: rgba(0,0,0,0.2); border-radius: 14px; padding: 12px 18px;
-    width: 100%;
-  }
-  .pile-count { font-family: 'Baloo 2'; font-size: 1.3rem; color: var(--gold); }
-
   .opponents { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; width: 100%; }
   .opp-chip {
     background: rgba(0,0,0,0.22); border-radius: 10px; padding: 8px 12px;
@@ -206,6 +199,31 @@
   }
   .banner.call { background: var(--gold); color: var(--ink); }
   .banner.you { background: var(--red); color: white; }
+
+  .turn-banner {
+    width: 100%; text-align: center; font-family: 'Baloo 2'; font-weight: 700;
+    padding: 14px 16px; border-radius: 12px; font-size: 1.15rem;
+    background: rgba(0,0,0,0.22); color: var(--cream-dim);
+    border: 2px solid transparent;
+  }
+  .turn-banner.mine {
+    background: linear-gradient(180deg, var(--gold), var(--gold-dark));
+    color: var(--ink);
+    border-color: #7a5814;
+    animation: pulse 1.2s infinite;
+  }
+  @media (prefers-reduced-motion: reduce) { .turn-banner.mine { animation: none; } }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--felt-dark); color: var(--cream); border: 2px solid var(--gold);
+    padding: 10px 18px; border-radius: 10px; font-weight: 700; font-family: 'Baloo 2';
+    opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 20;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .opp-chip.turn { outline: 2px solid var(--gold); }
 
   /* ---- Results ---- */
   .standings { width: 100%; display: flex; flex-direction: column; gap: 10px; }
@@ -263,10 +281,7 @@
   <section id="screen-game" class="screen">
     <div class="table-top">
       <div class="banner call" id="callBanner" style="display:none;"></div>
-      <div class="pile-box">
-        <div>🂠 Draw pile: <span class="pile-count" id="pileCount">0</span></div>
-        <button class="btn btn-gold" id="btnDraw" style="display:none; width:auto; padding:10px 16px;">Draw card</button>
-      </div>
+      <div class="turn-banner" id="turnBanner">-</div>
       <div class="opponents" id="opponents"></div>
       <h3 style="align-self:flex-start; margin-top:6px;">Your chits</h3>
       <div class="hand-area" id="handArea"></div>
@@ -288,6 +303,8 @@
     <div id="resultsWaitMsg" class="hint">Waiting for the host to start a new round…</div>
   </section>
 
+  <div class="toast" id="sentToast"></div>
+
 </div>
 
 <script type="module">
@@ -295,7 +312,6 @@ import { joinRoom, selfId } from 'https://esm.run/trystero';
 
 const APP_ID = 'paddy-four-of-a-kind-v1';
 const RANK_EMOJIS = ['🐷','🐸','🐵','🦊','🐼','🐨','🦁','🐯','🐰','🦉'];
-const COPIES_PER_RANK = 6;
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 8;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
@@ -311,8 +327,7 @@ const state = {
   hand: [],              // my 4 settled cards
   incoming: null,        // a 5th card waiting on a keep/pass decision
   outgoingBusy: false,   // currently trying to hand a card to my right neighbor
-  pileCount: 0,
-  pile: [],              // host only
+  currentTurn: null,     // peerId of whoever currently holds 5 cards and must act
   standings: {},         // peerId -> rank (client mirror, host-authoritative)
   roundCalled: false,
   claimed: false,        // I already sent my slap claim
@@ -356,7 +371,7 @@ function connectToRoom(roomId, isHost) {
   actions.roster = room.makeAction('roster');
   actions.gameStart = room.makeAction('gameStart');
   actions.deal = room.makeAction('deal');
-  actions.pileUpdate = room.makeAction('pileUpdate');
+  actions.turnChanged = room.makeAction('turnChanged');
   actions.passCard = room.makeAction('passCard', { kind: 'request', onRequest: handlePassRequest });
   actions.slapClaim = room.makeAction('slapClaim');
   actions.roundCalled = room.makeAction('roundCalled');
@@ -403,7 +418,7 @@ function connectToRoom(roomId, isHost) {
   actions.gameStart.onMessage = (data) => {
     if (isHost) return;
     state.players = data.players;
-    state.pileCount = data.pileCount;
+    state.currentTurn = data.currentTurn;
     state.standings = {};
     state.roundCalled = false;
     state.claimed = false;
@@ -415,8 +430,8 @@ function connectToRoom(roomId, isHost) {
     renderGame();
   };
 
-  actions.pileUpdate.onMessage = (data) => {
-    state.pileCount = data.count;
+  actions.turnChanged.onMessage = (data) => {
+    state.currentTurn = data.peerId;
     renderGame();
   };
 
@@ -440,6 +455,7 @@ function connectToRoom(roomId, isHost) {
     state.hand = [];
     state.incoming = null;
     state.outgoingBusy = false;
+    state.currentTurn = null;
     state.standings = {};
     state.roundCalled = false;
     state.claimed = false;
@@ -461,21 +477,24 @@ function broadcastRoster() {
 function handlePassRequest(data) {
   if (state.incoming !== null) return false; // my hands are full, try again later
   state.incoming = data.card;
+  state.currentTurn = selfId; // receiving a card always makes it my move
+  actions.turnChanged.send({ peerId: selfId });
   renderGame();
   return true;
 }
 
 // ---------- host: game setup ----------
+// Exactly N ranks (one per player) x 4 copies = 4*N cards total — no draw pile,
+// no surplus. Every card dealt is accounted for in someone's hand at all times.
 function hostBuildDeckAndDeal() {
   const n = state.players.length;
   const ranks = RANK_EMOJIS.slice(0, n);
   let deck = [];
-  ranks.forEach(r => { for (let i = 0; i < COPIES_PER_RANK; i++) deck.push(r); });
+  ranks.forEach(r => { for (let i = 0; i < 4; i++) deck.push(r); });
   deck = shuffle(deck);
 
   const hands = {};
   state.players.forEach(p => { hands[p.id] = deck.splice(0, 4); });
-  state.pile = deck; // whatever's left is the draw pile
 
   state.players.forEach(p => {
     if (p.id === selfId) {
@@ -485,13 +504,13 @@ function hostBuildDeckAndDeal() {
     }
   });
 
-  state.pileCount = state.pile.length;
   state.standings = {};
   state.roundCalled = false;
   state.claimed = false;
   state.nextRank = 1;
+  state.currentTurn = selfId; // dealer always makes the opening move
 
-  actions.gameStart.send({ players: state.players, pileCount: state.pileCount });
+  actions.gameStart.send({ players: state.players, currentTurn: state.currentTurn });
   beginGameUI();
 }
 
@@ -504,7 +523,16 @@ function rightNeighborId() {
 }
 
 // ---------- gameplay actions (any player) ----------
-function tryPassCard(card) {
+let toastTimer = null;
+function showSentToast(name) {
+  const toast = els('sentToast');
+  toast.textContent = `✅ Sent to ${name}`;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+}
+
+function tryPassCard(card, targetName) {
   state.outgoingBusy = true;
   renderGame();
   const target = rightNeighborId();
@@ -514,6 +542,8 @@ function tryPassCard(card) {
       .then(accepted => {
         if (accepted) {
           state.outgoingBusy = false;
+          state.currentTurn = null; // it's nobody's turn until the receiver confirms
+          showSentToast(targetName);
           renderGame();
         } else {
           setTimeout(attempt, 250);
@@ -526,27 +556,24 @@ function tryPassCard(card) {
 
 function onCardClick(index) {
   if (state.outgoingBusy) return;
+  if (state.currentTurn !== selfId) return; // not your turn yet
   const fiveCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand.slice();
   const chosen = fiveCards[index];
   fiveCards.splice(index, 1);
   state.hand = fiveCards;
   state.incoming = null;
+  const targetId = rightNeighborId();
+  const targetName = state.players.find(p => p.id === targetId)?.name || 'next player';
   renderGame();
-  tryPassCard(chosen);
-}
-
-function onDrawClick() {
-  if (state.incoming !== null || state.outgoingBusy) return;
-  if (state.pile.length === 0) return;
-  state.incoming = state.pile.shift();
-  state.pileCount = state.pile.length;
-  actions.pileUpdate.send({ count: state.pileCount });
-  renderGame();
+  tryPassCard(chosen, targetName);
 }
 
 function handHasFourOfKind() {
-  if (state.hand.length < 4) return false;
-  return state.hand.every(c => c === state.hand[0]);
+  const cards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand;
+  if (cards.length < 4) return false;
+  const counts = {};
+  for (const c of cards) counts[c] = (counts[c] || 0) + 1;
+  return Object.values(counts).some(n => n >= 4);
 }
 
 function onSlapClick() {
@@ -649,15 +676,25 @@ function escapeHtml(s) {
 }
 
 function renderGame() {
-  els('pileCount').textContent = state.pileCount;
-  els('btnDraw').style.display = state.isHost ? 'inline-block' : 'none';
-  els('btnDraw').disabled = state.incoming !== null || state.outgoingBusy || state.pileCount === 0;
+  const turnBanner = els('turnBanner');
+  const isMyTurn = state.currentTurn === selfId;
+  if (state.currentTurn === null) {
+    turnBanner.textContent = '🔄 Chit is on its way…';
+    turnBanner.classList.remove('mine');
+  } else if (isMyTurn) {
+    turnBanner.textContent = "🫵 It's your turn — send a chit!";
+    turnBanner.classList.add('mine');
+  } else {
+    const holder = state.players.find(p => p.id === state.currentTurn);
+    turnBanner.textContent = `⏳ Waiting for ${holder ? escapeHtml(holder.name) : 'someone'}…`;
+    turnBanner.classList.remove('mine');
+  }
 
   const opp = els('opponents');
   opp.innerHTML = '';
   state.players.filter(p => p.id !== selfId).forEach(p => {
     const chip = document.createElement('div');
-    chip.className = 'opp-chip';
+    chip.className = 'opp-chip' + (p.id === state.currentTurn ? ' turn' : '');
     const rank = state.standings[p.id];
     chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rank ? `<span class="rank-badge">#${rank}</span>` : '<span>🎴 in play</span>');
     opp.appendChild(chip);
@@ -666,18 +703,25 @@ function renderGame() {
   const handArea = els('handArea');
   handArea.innerHTML = '';
   const displayCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand;
+  const canAct = isMyTurn && !state.outgoingBusy;
   displayCards.forEach((card, i) => {
     const div = document.createElement('div');
     const isNew = state.incoming !== null && i === displayCards.length - 1;
-    div.className = 'card' + (isNew ? ' incoming' : '') + (state.outgoingBusy ? ' pending' : '');
+    div.className = 'card' + (isNew ? ' incoming' : '') + (!canAct ? ' pending' : '');
     div.textContent = card;
-    div.onclick = () => onCardClick(i);
+    if (canAct) div.onclick = () => onCardClick(i);
     handArea.appendChild(div);
   });
 
-  els('handHint').textContent = state.outgoingBusy
-    ? 'Sending your chit along… waiting for space on the other side.'
-    : (state.incoming !== null ? 'New chit arrived — tap ANY chit to pass it right.' : 'Waiting for your next chit.');
+  if (state.outgoingBusy) {
+    els('handHint').textContent = 'Sending your chit along…';
+  } else if (isMyTurn) {
+    const targetId = rightNeighborId();
+    const targetName = state.players.find(p => p.id === targetId)?.name || 'the next player';
+    els('handHint').textContent = `Your turn! Tap a chit to send it to ${targetName}.`;
+  } else {
+    els('handHint').textContent = "Not your turn yet — you'll be notified above.";
+  }
 
   const callBanner = els('callBanner');
   if (state.roundCalled && !state.claimed) {
@@ -713,7 +757,7 @@ function renderGame() {
     slapBtn.classList.remove('ready', 'scramble');
   }
 
-  els('gameStatus').textContent = state.isHost ? 'You are the dealer — use Draw to feed new chits into the game.' : '';
+
 }
 
 function renderResults(standings) {
@@ -764,7 +808,6 @@ els('btnStart').addEventListener('click', () => {
   hostBuildDeckAndDeal();
 });
 
-els('btnDraw').addEventListener('click', onDrawClick);
 els('btnSlap').addEventListener('click', onSlapClick);
 
 els('btnPlayAgain').addEventListener('click', () => {
