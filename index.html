@@ -260,7 +260,7 @@
       </div>
     </div>
     <div id="joinError" class="hint" style="color:#ffb4a8;"></div>
-    <div class="footer-note">Peer-to-peer — no server, no accounts. Everyone needs the same room code.</div>
+    <div class="footer-note">Powered by Convex — everyone needs the same room code.</div>
   </section>
 
   <!-- LOBBY SCREEN -->
@@ -307,40 +307,38 @@
 
 </div>
 
-<script type="module">
-import { joinRoom, selfId } from 'https://esm.run/trystero';
+<script src="https://unpkg.com/convex@1.3.1/dist/browser.bundle.js"></script>
+<script>
+// ====================================================================
+// Convex deployment powering this game (see convex/game.ts for the
+// createRoom / joinRoom / startGame / passCard / claimSlap functions).
+// Change this if you deploy to a different Convex project.
+// ====================================================================
+const CONVEX_URL = "https://adamant-dogfish-103.convex.cloud";
+const client = new convex.ConvexClient(CONVEX_URL);
+const api = convex.anyApi;
 
-const APP_ID = 'paddy-four-of-a-kind-v1';
-const RANK_EMOJIS = ['🐷','🐸','🐵','🦊','🐼','🐨','🦁','🐯','🐰','🦉'];
 const MIN_PLAYERS = 3;
-const MAX_PLAYERS = 8;
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
 
-const state = {
-  screen: 'join',
+const myState = {
   name: '',
-  roomId: null,
+  roomCode: '',
+  seat: null,
   isHost: false,
-  room: null,
-  players: [],          
-  hand: [],              
-  incoming: null,        
-  outgoingBusy: false,   
-  currentTurn: null,     
-  standings: {},         
-  roundCalled: false,
-  claimed: false,        
-  nextRank: 1,           
+  unsubscribe: null,
+  sending: false,   // guards against double-tapping a card while a pass is in flight
 };
-
-let actions = {};
 
 function els(id) { return document.getElementById(id); }
 
 function showScreen(name) {
-  state.screen = name;
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   els('screen-' + name).classList.add('active');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function randomCode(len = 5) {
@@ -349,579 +347,188 @@ function randomCode(len = 5) {
   return out;
 }
 
-function shuffle(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function connectToRoom(roomId, isHost) {
-  if (state.room) {
-    try { state.room.leave(); } catch (e) {}
-  }
-
-  state.roomId = roomId;
-  state.isHost = isHost;
-  state.room = joinRoom({
-    appId: APP_ID,
-    turnConfig: [
-      {
-        urls: [
-          'turn:openrelay.metered.ca:80',
-          'turn:openrelay.metered.ca:443',
-          'turn:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ],
-    callbacks: {
-      onJoinError: (details) => {
-        console.error('[trystero] join error', details);
-        if (!isHost) scheduleJoinRetry(roomId, 'A connection error occurred.');
-      }
-    }
-  }, roomId);
-
-  const room = state.room;
-  actions.hello = room.makeAction('hello');
-  actions.roster = room.makeAction('roster');
-  actions.helloAck = room.makeAction('helloAck');
-  actions.keepAlive = room.makeAction('keepAlive');
-  actions.gameStart = room.makeAction('gameStart');
-  actions.deal = room.makeAction('deal');
-  actions.turnChanged = room.makeAction('turnChanged');
-  actions.passCard = room.makeAction('passCard', { kind: 'request', onRequest: handlePassRequest });
-  actions.slapClaim = room.makeAction('slapClaim');
-  actions.roundCalled = room.makeAction('roundCalled');
-  actions.rankAssigned = room.makeAction('rankAssigned');
-  actions.gameOver = room.makeAction('gameOver');
-  actions.playAgain = room.makeAction('playAgain');
-  actions.playersUpdated = room.makeAction('playersUpdated');
-  actions.gameAborted = room.makeAction('gameAborted');
-
-  if (isHost) {
-    state.players = [{ id: selfId, name: state.name, seat: 0 }];
-  }
-
-  room.onPeerJoin = peerId => {
-    if (isHost) {
-      actions.roster.send({ players: state.players }, peerId);
-    } else {
-      actions.hello.send({ name: state.name }, peerId);
-    }
-  };
-
-  room.onPeerLeave = peerId => {
-    if (isHost && state.screen === 'lobby') {
-      state.players = state.players.filter(p => p.id !== peerId);
-      broadcastRoster();
-      renderLobby();
-    }
-    if (isHost && state.screen === 'game') {
-      hostHandlePlayerLeftMidGame(peerId);
-    }
-    if (!isHost && state.screen !== 'join' && peerId === hostPeerId()) {
-      handleHostLeft();
-    }
-  };
-
-  actions.hello.onMessage = (data, peerId) => {
-    if (!isHost) return;
-
-    actions.helloAck.send({}, peerId);
-
-    if (state.screen === 'game') {
-      actions.gameAborted.send({ reason: 'Game in progress. Try joining after this round!' }, peerId);
-      return;
-    }
-
-    if (state.players.some(p => p.id === peerId)) return;
-    if (state.players.length >= MAX_PLAYERS) return;
-
-    state.players.push({ id: peerId, name: data.name, seat: state.players.length });
-    broadcastRoster();
-    renderLobby();
-  };
-
-  actions.helloAck.onMessage = () => {
-    markJoinConnected();
-  };
-
-  actions.roster.onMessage = (data) => {
-    if (isHost) return;
-    markJoinConnected();
-    state.players = data.players;
-    renderLobby();
-  };
-
-  actions.gameStart.onMessage = (data) => {
-    if (isHost) return;
-    state.players = data.players;
-    state.currentTurn = data.currentTurn;
-    state.hand = [];
-    state.incoming = null;
-    state.outgoingBusy = false;
-    state.standings = {};
-    state.roundCalled = false;
-    state.claimed = false;
-    beginGameUI();
-  };
-
-  actions.playersUpdated.onMessage = (data) => {
-    if (isHost) return;
-    state.players = data.players;
-    state.standings = data.standings;
-    if (state.screen === 'game') renderGame();
-  };
-
-  actions.gameAborted.onMessage = (data) => {
-    if (isHost) return;
-    state.hand = [];
-    state.incoming = null;
-    state.outgoingBusy = false;
-    state.currentTurn = null;
-    state.standings = {};
-    state.roundCalled = false;
-    state.claimed = false;
-    showToast(data.reason, 4000);
-    renderLobby();
-    showScreen('lobby');
-  };
-
-  actions.deal.onMessage = (data) => {
-    state.hand = data.hand;
-    renderGame();
-  };
-
-  actions.turnChanged.onMessage = (data) => {
-    state.currentTurn = data.peerId;
-    renderGame();
-  };
-
-  actions.roundCalled.onMessage = () => {
-    state.roundCalled = true;
-    renderGame();
-  };
-
-  actions.rankAssigned.onMessage = (data) => {
-    state.standings[data.peerId] = data.rank;
-    if (data.peerId === selfId) state.claimed = true;
-    renderGame();
-  };
-
-  actions.gameOver.onMessage = (data) => {
-    renderResults(data.standings);
-  };
-
-  actions.playAgain.onMessage = (data) => {
-    state.players = data.players;
-    state.hand = [];
-    state.incoming = null;
-    state.outgoingBusy = false;
-    state.currentTurn = null;
-    state.standings = {};
-    state.roundCalled = false;
-    state.claimed = false;
-    renderLobby();
-    showScreen('lobby');
-  };
-
-  if (isHost) {
-    renderLobby();
-    showScreen('lobby');
-  }
-}
-
-function broadcastRoster() {
-  actions.roster.send({ players: state.players });
-}
-
-setInterval(() => {
-  if (!state.isHost || !actions.roster) return;
-  try { broadcastRoster(); } catch (e) {}
-}, 5000);
-
-let joinRetryTimer = null;
-let joinAttempt = 0;
-let joinRoomIdInProgress = null;
-
-function attemptJoin(roomId) {
-  joinRoomIdInProgress = roomId;
-  joinAttempt = 1;
-  els('lobbyPlayers').innerHTML = '';
-  updateConnectingUI();
-  connectToRoom(roomId, false);
-  wireHostSlapListener();
-  armJoinTimeout(roomId);
-}
-
-function armJoinTimeout(roomId) {
-  clearTimeout(joinRetryTimer);
-  const timeoutMs = Math.min(6000 + (joinAttempt - 1) * 2500, 15000);
-  joinRetryTimer = setTimeout(() => {
-    if (state.isHost || state.screen !== 'lobby') return;
-    if (state.players.length > 0) return; 
-    scheduleJoinRetry(roomId, null);
-  }, timeoutMs);
-}
-
-function scheduleJoinRetry(roomId, reasonNote) {
-  if (roomId !== joinRoomIdInProgress) return; 
-  joinAttempt += 1;
-  updateConnectingUI(reasonNote);
-  connectToRoom(roomId, false);
-  wireHostSlapListener();
-  armJoinTimeout(roomId);
-}
-
-function updateConnectingUI(reasonNote) {
-  const msg = els('lobbyWaitMsg');
-  if (!msg) return;
-  if (joinAttempt <= 1) {
-    msg.textContent = 'Connecting to the host…';
-  } else if (joinAttempt <= 4) {
-    msg.textContent = `Still connecting… retrying (attempt ${joinAttempt}).`;
-  } else {
-    msg.textContent = `Still trying to connect (attempt ${joinAttempt})… this can take longer on some networks, but we'll keep retrying.`;
-  }
-}
-
-function markJoinConnected() {
-  clearTimeout(joinRetryTimer);
-  joinRoomIdInProgress = null;
-  const msg = els('lobbyWaitMsg');
-  if (msg) msg.textContent = 'Waiting for the host to start the game…';
-}
-
-function handlePassRequest(data) {
-  if (state.incoming !== null) return false; 
-  state.incoming = data.card;
-  state.currentTurn = selfId; 
-  actions.turnChanged.send({ peerId: selfId });
-  renderGame();
-  return true;
-}
-
-function hostBuildDeckAndDeal() {
-  const n = state.players.length;
-  const ranks = RANK_EMOJIS.slice(0, n);
-  let deck = [];
-  ranks.forEach(r => { for (let i = 0; i < 4; i++) deck.push(r); });
-  deck = shuffle(deck);
-
-  const hands = {};
-  state.players.forEach(p => { hands[p.id] = deck.splice(0, 4); });
-
-  state.incoming = null;
-  state.outgoingBusy = false;
-
-  state.players.forEach(p => {
-    if (p.id === selfId) {
-      state.hand = hands[p.id];
-    } else {
-      actions.deal.send({ hand: hands[p.id] }, p.id);
-    }
-  });
-
-  state.standings = {};
-  state.roundCalled = false;
-  state.claimed = false;
-  state.nextRank = 1;
-  state.currentTurn = selfId; 
-
-  actions.gameStart.send({ players: state.players, currentTurn: state.currentTurn });
-  beginGameUI();
-}
-
-function seatOf(peerId) { return state.players.find(p => p.id === peerId)?.seat ?? 0; }
-function rightNeighborId() {
-  const n = state.players.length;
-  const mySeat = seatOf(selfId);
-  const nextSeat = (mySeat + 1) % n;
-  return state.players.find(p => p.seat === nextSeat)?.id;
+function flashJoinError(msg) {
+  els('joinError').textContent = msg;
+  setTimeout(() => { els('joinError').textContent = ''; }, 3000);
 }
 
 let toastTimer = null;
-function showToast(message, durationMs = 1800) {
+function showToast(message, durationMs = 2200) {
   const toast = els('sentToast');
   toast.textContent = message;
   toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), durationMs);
 }
-function showSentToast(name) {
-  showToast(`✅ Sent to ${name}`);
-}
 
-function tryPassCard(card, targetName) {
-  state.outgoingBusy = true;
-  renderGame();
-  const target = rightNeighborId();
+// ---------- join / create ----------
+async function handleCreateRoom() {
+  const name = els('nameInput').value.trim();
+  if (!name) { flashJoinError('Type your name first.'); return; }
 
-  const attempt = () => {
-    actions.passCard.request({ card }, target, 1500)
-      .then(accepted => {
-        if (accepted) {
-          state.outgoingBusy = false;
-          state.currentTurn = null; 
-          showSentToast(targetName);
-          renderGame();
-        } else {
-          setTimeout(attempt, 250);
-        }
-      })
-      .catch(() => setTimeout(attempt, 350));
-  };
-  attempt();
-}
-
-function onCardClick(index) {
-  if (state.outgoingBusy) return;
-  if (state.currentTurn !== selfId) return; 
-  const fiveCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand.slice();
-  const chosen = fiveCards[index];
-  fiveCards.splice(index, 1);
-  state.hand = fiveCards;
-  state.incoming = null;
-  const targetId = rightNeighborId();
-  const targetName = state.players.find(p => p.id === targetId)?.name || 'next player';
-  renderGame();
-  tryPassCard(chosen, targetName);
-}
-
-function handHasFourOfKind() {
-  const cards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand;
-  if (cards.length < 4) return false;
-  const counts = {};
-  for (const c of cards) counts[c] = (counts[c] || 0) + 1;
-  return Object.values(counts).some(n => n >= 4);
-}
-
-function onSlapClick() {
-  if (state.claimed) return;
-  if (!state.roundCalled && !handHasFourOfKind()) return;
-  state.claimed = true; 
-  renderGame();
-  if (state.isHost) {
-    hostHandleSlap(selfId, state.name);
-  } else {
-    actions.slapClaim.send({ name: state.name }, hostPeerId());
+  els('btnCreate').disabled = true;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = randomCode();
+    try {
+      await client.mutation(api.game.createRoom, { code, hostName: name });
+      myState.name = name;
+      myState.roomCode = code;
+      myState.seat = 0;
+      myState.isHost = true;
+      subscribeToRoom(code);
+      els('lobbyCode').textContent = code;
+      showScreen('lobby');
+      els('btnCreate').disabled = false;
+      return;
+    } catch (err) {
+      lastErr = err; // room code collided — try another one
+    }
   }
+  els('btnCreate').disabled = false;
+  flashJoinError(lastErr ? lastErr.message : 'Could not create a room — try again.');
 }
 
-function hostPeerId() {
-  return state.players.find(p => p.seat === 0)?.id;
-}
+async function handleJoinRoom() {
+  const name = els('nameInput').value.trim();
+  const code = els('joinCodeInput').value.trim().toUpperCase();
+  if (!name) { flashJoinError('Type your name first.'); return; }
+  if (code.length < 4) { flashJoinError('That room code looks too short.'); return; }
 
-function hostHandleSlap(peerId, name) {
-  if (state.standings[peerId] !== undefined) return;
-
-  if (!state.roundCalled) {
-    state.roundCalled = true;
-    actions.roundCalled.send({});
-  }
-
-  const rank = state.nextRank++;
-  state.standings[peerId] = rank;
-  actions.rankAssigned.send({ peerId, rank });
-  if (peerId === selfId) renderGame();
-
-  const total = state.players.length;
-  const rankedCount = Object.keys(state.standings).length;
-
-  if (rankedCount === total - 1) {
-    autoFinishLastPlayer();
-  } else if (rankedCount >= total) {
-    finishGame();
-  }
-}
-
-function autoFinishLastPlayer() {
-  const last = state.players.find(p => state.standings[p.id] === undefined);
-  if (last) {
-    const lastRank = state.nextRank++;
-    state.standings[last.id] = lastRank;
-    actions.rankAssigned.send({ peerId: last.id, rank: lastRank });
-    if (last.id === selfId) renderGame();
-  }
-  finishGame();
-}
-
-function finishGame() {
-  const standings = state.players
-    .map(p => ({ id: p.id, name: p.name, rank: state.standings[p.id] }))
-    .sort((a, b) => a.rank - b.rank);
-  actions.gameOver.send({ standings });
-  renderResults(standings);
-}
-
-function renumberStandings() {
-  const entries = Object.entries(state.standings).sort((a, b) => a[1] - b[1]);
-  const newStandings = {};
-  entries.forEach(([id], idx) => { newStandings[id] = idx + 1; });
-  state.standings = newStandings;
-  state.nextRank = entries.length + 1;
-}
-
-function hostHandlePlayerLeftMidGame(peerId) {
-  const leavingPlayer = state.players.find(p => p.id === peerId);
-  if (!leavingPlayer) return;
-
-  const wasRanked = state.standings[peerId] !== undefined;
-  state.players = state.players.filter(p => p.id !== peerId);
-  delete state.standings[peerId];
-  state.players.forEach((p, i) => { p.seat = i; });
-
-  if (state.players.length < MIN_PLAYERS) {
-    const reason = `${leavingPlayer.name} left — not enough players to continue. Back to the lobby.`;
-    showToast(reason, 4000);
-    actions.gameAborted.send({ reason });
-    state.hand = [];
-    state.incoming = null;
-    state.outgoingBusy = false;
-    state.currentTurn = null;
-    state.standings = {};
-    state.roundCalled = false;
-    state.claimed = false;
-    renderLobby();
+  els('btnJoin').disabled = true;
+  try {
+    const res = await client.mutation(api.game.joinRoom, { code, name });
+    if (!res.success) {
+      flashJoinError('That game is already in progress — ask the host for a new room.');
+      els('btnJoin').disabled = false;
+      return;
+    }
+    myState.name = name;
+    myState.roomCode = code;
+    myState.seat = res.seat;
+    myState.isHost = false;
+    subscribeToRoom(code);
+    els('lobbyCode').textContent = code;
     showScreen('lobby');
-    return;
+  } catch (err) {
+    flashJoinError(err.message || 'Could not join that room.');
   }
-
-  if (wasRanked) {
-    renumberStandings();
-    actions.playersUpdated.send({ players: state.players, standings: state.standings });
-    renderGame();
-    const rankedCount = Object.keys(state.standings).length;
-    if (rankedCount === state.players.length - 1) autoFinishLastPlayer();
-    else if (rankedCount >= state.players.length) finishGame();
-    return;
-  }
-
-  if (state.roundCalled) {
-    showToast(`${leavingPlayer.name} left the game.`, 2500);
-    actions.playersUpdated.send({ players: state.players, standings: state.standings });
-    renderGame();
-    const rankedCount = Object.keys(state.standings).length;
-    if (rankedCount === state.players.length - 1) autoFinishLastPlayer();
-    else if (rankedCount >= state.players.length) finishGame();
-    return;
-  }
-
-  showToast(`${leavingPlayer.name} left — reshuffling the cards…`, 3000);
-  hostBuildDeckAndDeal();
+  els('btnJoin').disabled = false;
 }
 
-function handleHostLeft() {
-  clearTimeout(joinRetryTimer);
-  state.hand = [];
-  state.incoming = null;
-  state.outgoingBusy = false;
-  state.currentTurn = null;
-  state.standings = {};
-  state.roundCalled = false;
-  state.claimed = false;
-  state.players = [];
-  showToast('Host disconnected — the game has ended.', 4000);
-  showScreen('join');
+function subscribeToRoom(code) {
+  if (myState.unsubscribe) myState.unsubscribe();
+  myState.unsubscribe = client.onUpdate(api.game.getRoom, { code }, (room) => {
+    if (!room) return;
+    renderUI(room);
+  });
 }
 
-function wireHostSlapListener() {
-  actions.slapClaim.onMessage = (data, peerId) => {
-    if (!state.isHost) return;
-    hostHandleSlap(peerId, data.name);
-  };
+// ---------- reactive render ----------
+function renderUI(room) {
+  if (room.phase === 'LOBBY') {
+    showScreen('lobby');
+    renderLobby(room);
+  } else if (room.phase === 'GAME') {
+    showScreen('game');
+    renderGame(room);
+  } else if (room.phase === 'RESULTS') {
+    showScreen('results');
+    renderResults(room);
+  }
 }
 
-function renderLobby() {
-  els('lobbyCode').textContent = state.roomId;
+function renderLobby(room) {
+  els('lobbyCode').textContent = room.code;
   const list = els('lobbyPlayers');
   list.innerHTML = '';
-  state.players.forEach(p => {
+  room.players.forEach(p => {
     const row = document.createElement('div');
     row.className = 'player-chip';
-    row.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (p.seat === 0 ? '<span class="tag">HOST</span>' : '');
+    row.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (p.isHost ? '<span class="tag">HOST</span>' : '');
     list.appendChild(row);
   });
 
   const hostControls = els('lobbyHostControls');
   const waitMsg = els('lobbyWaitMsg');
-  if (state.isHost) {
+  if (myState.isHost) {
     hostControls.style.display = 'flex';
     waitMsg.style.display = 'none';
     const btn = els('btnStart');
-    const enough = state.players.length >= MIN_PLAYERS;
+    const enough = room.players.length >= MIN_PLAYERS;
     btn.disabled = !enough;
-    btn.textContent = enough ? `Start game (${state.players.length} players)` : `Start game (need ${MIN_PLAYERS}+)`;
+    btn.textContent = enough ? `Start game (${room.players.length} players)` : `Start game (need ${MIN_PLAYERS}+)`;
   } else {
     hostControls.style.display = 'none';
     waitMsg.style.display = 'block';
   }
 }
 
-function beginGameUI() {
-  showScreen('game');
-  renderGame();
+async function handleStartGame() {
+  if (!myState.isHost) return;
+  try {
+    await client.mutation(api.game.startGame, { code: myState.roomCode });
+  } catch (err) {
+    showToast(err.message || "Couldn't start the game", 3000);
+  }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function handHasFourOfKind(hand) {
+  if (!hand || hand.length < 4) return false;
+  const counts = {};
+  for (const c of hand) counts[c] = (counts[c] || 0) + 1;
+  return Object.values(counts).some(n => n >= 4);
 }
 
-function renderGame() {
+function renderGame(room) {
+  const isMyTurn = room.currentTurnSeat === myState.seat;
   const turnBanner = els('turnBanner');
-  const isMyTurn = state.currentTurn === selfId;
-  if (state.currentTurn === null) {
-    turnBanner.textContent = '🔄 Chit is on its way…';
-    turnBanner.classList.remove('mine');
-  } else if (isMyTurn) {
+  if (isMyTurn) {
     turnBanner.textContent = "🫵 It's your turn — send a chit!";
     turnBanner.classList.add('mine');
   } else {
-    const holder = state.players.find(p => p.id === state.currentTurn);
+    const holder = room.players.find(p => p.seat === room.currentTurnSeat);
     turnBanner.textContent = `⏳ Waiting for ${holder ? escapeHtml(holder.name) : 'someone'}…`;
     turnBanner.classList.remove('mine');
   }
 
   const opp = els('opponents');
   opp.innerHTML = '';
-  state.players.filter(p => p.id !== selfId).forEach(p => {
+  room.players.filter(p => p.seat !== myState.seat).forEach(p => {
     const chip = document.createElement('div');
-    chip.className = 'opp-chip' + (p.id === state.currentTurn ? ' turn' : '');
-    const rank = state.standings[p.id];
-    chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rank ? `<span class="rank-badge">#${rank}</span>` : '<span>🎴 in play</span>');
+    chip.className = 'opp-chip' + (p.seat === room.currentTurnSeat ? ' turn' : '');
+    const rankIdx = room.standings.indexOf(p.name);
+    chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rankIdx >= 0 ? `<span class="rank-badge">#${rankIdx + 1}</span>` : '<span>🎴 in play</span>');
     opp.appendChild(chip);
   });
 
+  const hand = room.hands[myState.seat] || [];
   const handArea = els('handArea');
   handArea.innerHTML = '';
-  const displayCards = state.incoming !== null ? state.hand.concat([state.incoming]) : state.hand;
-  const canAct = isMyTurn && !state.outgoingBusy;
-  displayCards.forEach((card, i) => {
+  const canAct = isMyTurn && !myState.sending;
+  hand.forEach((card, idx) => {
     const div = document.createElement('div');
-    const isNew = state.incoming !== null && i === displayCards.length - 1;
-    div.className = 'card' + (isNew ? ' incoming' : '') + (!canAct ? ' pending' : '');
+    div.className = 'card' + (!canAct ? ' pending' : '');
     div.textContent = card;
-    if (canAct) div.onclick = () => onCardClick(i);
+    if (canAct) div.onclick = () => handlePassCard(idx);
     handArea.appendChild(div);
   });
 
-  if (state.outgoingBusy) {
-    els('handHint').textContent = 'Sending your chit along…';
+  const handHint = els('handHint');
+  if (myState.sending) {
+    handHint.textContent = 'Sending your chit along…';
   } else if (isMyTurn) {
-    const targetId = rightNeighborId();
-    const targetName = state.players.find(p => p.id === targetId)?.name || 'the next player';
-    els('handHint').textContent = `Your turn! Tap a chit to send it to ${targetName}.`;
+    const totalSeats = room.players.length;
+    const nextSeat = (myState.seat + 1) % totalSeats;
+    const target = room.players.find(p => p.seat === nextSeat);
+    handHint.textContent = `Your turn! Tap a chit to send it to ${target ? escapeHtml(target.name) : 'the next player'}.`;
   } else {
-    els('handHint').textContent = "Not your turn yet — you'll be notified above.";
+    handHint.textContent = "Not your turn yet — you'll be notified above.";
   }
 
   const callBanner = els('callBanner');
-  if (state.roundCalled && !state.claimed) {
+  const iAlreadySlapped = room.standings.includes(myState.name);
+  if (room.slapCalled && !iAlreadySlapped) {
     callBanner.style.display = 'block';
     callBanner.textContent = '🚨 Someone got four! SLAM the button now!';
   } else {
@@ -929,21 +536,17 @@ function renderGame() {
   }
 
   const slapBtn = els('btnSlap');
-  const myRank = state.standings[selfId];
-  if (myRank) {
+  const myRankIdx = room.standings.indexOf(myState.name);
+  if (myRankIdx >= 0) {
     slapBtn.disabled = true;
-    slapBtn.textContent = `You're #${myRank}!`;
+    slapBtn.textContent = `You're #${myRankIdx + 1}!`;
     slapBtn.classList.remove('ready', 'scramble');
-  } else if (state.claimed) {
-    slapBtn.disabled = true;
-    slapBtn.textContent = 'Claim sent…';
-    slapBtn.classList.remove('ready', 'scramble');
-  } else if (state.roundCalled) {
+  } else if (room.slapCalled) {
     slapBtn.disabled = false;
     slapBtn.textContent = 'SLAP!';
     slapBtn.classList.add('scramble');
     slapBtn.classList.remove('ready');
-  } else if (handHasFourOfKind()) {
+  } else if (handHasFourOfKind(hand)) {
     slapBtn.disabled = false;
     slapBtn.textContent = 'SLAP!';
     slapBtn.classList.add('ready');
@@ -953,65 +556,69 @@ function renderGame() {
     slapBtn.textContent = 'SLAP!';
     slapBtn.classList.remove('ready', 'scramble');
   }
+
+  els('gameStatus').textContent = room.standings.length > 0
+    ? `${room.standings.length}/${room.players.length} players have slapped`
+    : '';
 }
 
-function renderResults(standings) {
-  showScreen('results');
+async function handlePassCard(cardIndex) {
+  if (myState.sending) return;
+  myState.sending = true;
+  try {
+    await client.mutation(api.game.passCard, {
+      code: myState.roomCode,
+      playerSeat: myState.seat,
+      cardIndex,
+    });
+  } catch (err) {
+    showToast(err.message || "Couldn't pass that card", 2500);
+  }
+  myState.sending = false;
+}
+
+async function handleSlap() {
+  try {
+    await client.mutation(api.game.claimSlap, {
+      code: myState.roomCode,
+      playerName: myState.name,
+    });
+  } catch (err) {
+    showToast(err.message || "Couldn't register your slap", 2500);
+  }
+}
+
+function renderResults(room) {
   const list = els('standingsList');
   list.innerHTML = '';
   const medal = { 1: '🥇', 2: '🥈', 3: '🥉' };
-  standings.forEach(s => {
+  room.standings.forEach((name, idx) => {
+    const rank = idx + 1;
     const row = document.createElement('div');
-    row.className = 'standing-row' + (s.rank <= 3 ? ' p' + s.rank : '');
-    row.innerHTML = `<span class="place">${medal[s.rank] || '#' + s.rank}</span><span>${escapeHtml(s.name)}${s.id === selfId ? ' (you)' : ''}</span>`;
+    row.className = 'standing-row' + (rank <= 3 ? ' p' + rank : '');
+    row.innerHTML = `<span class="place">${medal[rank] || '#' + rank}</span><span>${escapeHtml(name)}${name === myState.name ? ' (you)' : ''}</span>`;
     list.appendChild(row);
   });
 
-  els('resultsHostControls').style.display = state.isHost ? 'block' : 'none';
-  els('resultsWaitMsg').style.display = state.isHost ? 'none' : 'block';
+  els('resultsHostControls').style.display = myState.isHost ? 'block' : 'none';
+  els('resultsWaitMsg').style.display = myState.isHost ? 'none' : 'block';
 }
 
-els('btnCreate').addEventListener('click', () => {
-  const name = els('nameInput').value.trim();
-  if (!name) { flashJoinError('Type your name first.'); return; }
-  state.name = name;
-  const code = randomCode();
-  connectToRoom(code, true);
-  wireHostSlapListener();
-});
-
-els('btnJoin').addEventListener('click', () => {
-  const name = els('nameInput').value.trim();
-  const code = els('joinCodeInput').value.trim().toUpperCase();
-  if (!name) { flashJoinError('Type your name first.'); return; }
-  if (code.length < 4) { flashJoinError('That room code looks too short.'); return; }
-  state.name = name;
-  showScreen('lobby');
-  els('lobbyCode').textContent = code;
-  attemptJoin(code);
-});
-
-function flashJoinError(msg) {
-  els('joinError').textContent = msg;
-  setTimeout(() => { els('joinError').textContent = ''; }, 2500);
+async function handlePlayAgain() {
+  if (!myState.isHost) return;
+  try {
+    await client.mutation(api.game.startGame, { code: myState.roomCode });
+  } catch (err) {
+    showToast(err.message || "Couldn't start a new round", 3000);
+  }
 }
 
-els('btnStart').addEventListener('click', () => {
-  if (!state.isHost) return;
-  hostBuildDeckAndDeal();
-});
-
-els('btnSlap').addEventListener('click', onSlapClick);
-
-els('btnPlayAgain').addEventListener('click', () => {
-  if (!state.isHost) return;
-  state.hand = [];
-  state.incoming = null;
-  state.outgoingBusy = false;
-  actions.playAgain.send({ players: state.players });
-  renderLobby();
-  showScreen('lobby');
-});
+// ---------- UI wiring ----------
+els('btnCreate').addEventListener('click', handleCreateRoom);
+els('btnJoin').addEventListener('click', handleJoinRoom);
+els('btnStart').addEventListener('click', handleStartGame);
+els('btnSlap').addEventListener('click', handleSlap);
+els('btnPlayAgain').addEventListener('click', handlePlayAgain);
 </script>
 </body>
 </html>
