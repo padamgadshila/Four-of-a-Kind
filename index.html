@@ -308,47 +308,7 @@
 </div>
 
 <script type="module">
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
-import {
-  getDatabase, ref, push, set as dbSet, remove,
-  onChildAdded, onChildRemoved, onDisconnect,
-  query, orderByChild, startAt, serverTimestamp
-} from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js';
-
-// ====================================================================
-// PASTE YOUR FIREBASE CONFIG HERE.
-// Get it free at https://console.firebase.google.com :
-//   1. Create a project (no credit card needed).
-//   2. Add a "Web app" to it.
-//   3. Enable "Realtime Database" (Build menu) in test mode.
-//   4. Copy the firebaseConfig object it gives you and paste it below.
-// ====================================================================
-const FIREBASE_CONFIG = {
-    apiKey: "AIzaSyDz-fnl9jOilXKaVXVJrXmItLae3887fbw",
-    authDomain: "four-494cb.firebaseapp.com",
-    databaseURL: "https://four-494cb-default-rtdb.firebaseio.com",
-    projectId: "four-494cb",
-    storageBucket: "four-494cb.firebasestorage.app",
-    messagingSenderId: "84734315827",
-    appId: "1:84734315827:web:56be52429177e7582a0246",
-  appId: "PASTE_ME"
-};
-
-const FIREBASE_NOT_CONFIGURED = Object.values(FIREBASE_CONFIG).some(v => v === 'PASTE_ME');
-let db = null;
-if (!FIREBASE_NOT_CONFIGURED) {
-  const firebaseApp = initializeApp(FIREBASE_CONFIG);
-  db = getDatabase(firebaseApp);
-} else {
-  const banner = document.createElement('div');
-  banner.style.cssText = 'background:#b73528;color:#fff;padding:12px 16px;border-radius:10px;margin-bottom:14px;font-weight:700;text-align:center;max-width:560px;';
-  banner.textContent = '⚠️ Setup needed: paste your free Firebase config near the top of the <script> tag in this file before players can connect.';
-  document.getElementById('app').prepend(banner);
-}
-
-// A stable random id for this browser tab, playing the same role
-// Trystero's `selfId` used to.
-const selfId = 'p-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+import { joinRoom, selfId } from 'https://esm.run/trystero';
 
 const APP_ID = 'paddy-four-of-a-kind-v1';
 const RANK_EMOJIS = ['🐷','🐸','🐵','🦊','🐼','🐨','🦁','🐯','🐰','🦉'];
@@ -400,115 +360,33 @@ function shuffle(arr) {
   return a;
 }
 
-// ---------- networking: Firebase-backed "room" with the same shape Trystero used ----------
-// This replaces peer-to-peer WebRTC entirely — every message now travels
-// through Firebase's servers over plain HTTPS/WebSocket, which is far more
-// likely to get through school/office wifi, mobile carriers, and other
-// networks that block or mangle WebRTC's connection setup.
-function joinFirebaseRoom(roomId) {
-  const base = `rooms/${APP_ID}/${roomId}`;
-  const presenceRef = ref(db, `${base}/presence`);
-  const selfPresenceRef = ref(db, `${base}/presence/${selfId}`);
-  const msgsRef = ref(db, `${base}/msgs`);
-
-  dbSet(selfPresenceRef, true);
-  onDisconnect(selfPresenceRef).remove(); // fires even on a crash/closed tab/lost network
-
-  const knownPeers = new Set();
-  let onPeerJoinCb = null;
-  let onPeerLeaveCb = null;
-
-  const unsubJoin = onChildAdded(presenceRef, snap => {
-    const peerId = snap.key;
-    if (peerId === selfId || knownPeers.has(peerId)) return;
-    knownPeers.add(peerId);
-    if (onPeerJoinCb) onPeerJoinCb(peerId);
-  });
-  const unsubLeave = onChildRemoved(presenceRef, snap => {
-    const peerId = snap.key;
-    if (!knownPeers.has(peerId)) return;
-    knownPeers.delete(peerId);
-    if (onPeerLeaveCb) onPeerLeaveCb(peerId);
-  });
-
-  const actionHandlers = {};
-  const pendingRequests = {};
-  const seenKeys = new Set();
-  let reqCounter = 0;
-
-  // Only react to messages from roughly "now" onward — new joiners get
-  // caught up via a fresh targeted 'roster' message instead of replaying
-  // the room's whole message history.
-  const recentMsgs = query(msgsRef, orderByChild('ts'), startAt(Date.now() - 3000));
-  const unsubMsgs = onChildAdded(recentMsgs, snap => {
-    if (seenKeys.has(snap.key)) return;
-    seenKeys.add(snap.key);
-    const msg = snap.val();
-    if (!msg || msg.from === selfId) return;
-    if (msg.target && msg.target !== selfId) return;
-    const handler = actionHandlers[msg.name];
-    if (!handler) return;
-
-    if (msg.kind === 'request') {
-      if (handler.onRequest) {
-        const accepted = handler.onRequest(msg.payload, { peerId: msg.from });
-        push(msgsRef, { name: msg.name, kind: 'ack', from: selfId, target: msg.from, reqId: msg.reqId, payload: { accepted }, ts: serverTimestamp() });
-      }
-    } else if (msg.kind === 'ack') {
-      const waiter = pendingRequests[msg.reqId];
-      if (waiter) { waiter(msg.payload.accepted); delete pendingRequests[msg.reqId]; }
-    } else if (handler.onMessage) {
-      handler.onMessage(msg.payload, { peerId: msg.from });
-    }
-  });
-
-  function makeAction(name, opts) {
-    const action = {};
-    if (opts && opts.kind === 'request') {
-      actionHandlers[name] = { onRequest: opts.onRequest };
-      action.request = (payload, sendOpts) => {
-        const reqId = selfId + '-' + (reqCounter++);
-        const timeoutMs = (sendOpts && sendOpts.timeoutMs) || 5000;
-        return new Promise(resolve => {
-          const timer = setTimeout(() => { delete pendingRequests[reqId]; resolve(false); }, timeoutMs);
-          pendingRequests[reqId] = accepted => { clearTimeout(timer); resolve(accepted); };
-          push(msgsRef, { name, kind: 'request', from: selfId, target: (sendOpts && sendOpts.target) || null, reqId, payload, ts: serverTimestamp() });
-        });
-      };
-    } else {
-      actionHandlers[name] = {};
-      Object.defineProperty(action, 'onMessage', {
-        get() { return actionHandlers[name].onMessage; },
-        set(fn) { actionHandlers[name].onMessage = fn; }
-      });
-      action.send = (payload, sendOpts) => {
-        push(msgsRef, { name, kind: 'msg', from: selfId, target: (sendOpts && sendOpts.target) || null, payload, ts: serverTimestamp() });
-      };
-    }
-    return action;
-  }
-
-  return {
-    makeAction,
-    set onPeerJoin(fn) { onPeerJoinCb = fn; },
-    set onPeerLeave(fn) { onPeerLeaveCb = fn; },
-    leave() {
-      remove(selfPresenceRef);
-      unsubJoin(); unsubLeave(); unsubMsgs();
-    }
-  };
-}
-
+// ---------- networking setup ----------
 function connectToRoom(roomId, isHost) {
   state.roomId = roomId;
   state.isHost = isHost;
-
-  if (FIREBASE_NOT_CONFIGURED) {
-    showFirebaseSetupNeeded();
-    return;
-  }
-
-  state.room = joinFirebaseRoom(roomId);
+  state.room = joinRoom({
+    appId: APP_ID,
+    // Default Trystero config only offers STUN, which fails silently on
+    // stricter NATs/firewalls (school/office wifi, some carriers). This
+    // free relay is used as a fallback so a direct connection isn't required.
+    turnConfig: [
+      {
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ],
+    callbacks: {
+      onJoinError: (details) => {
+        console.error('[trystero] join error', details);
+        if (!isHost) scheduleJoinRetry(roomId, 'A connection error occurred.');
+      }
+    }
+  }, roomId);
 
   const room = state.room;
   actions.hello = room.makeAction('hello');
@@ -649,31 +527,58 @@ function broadcastRoster() {
   actions.roster.send({ players: state.players });
 }
 
-function showFirebaseSetupNeeded() {
-  const el = els('joinError');
-  if (el) el.textContent = 'This game needs a Firebase config pasted into the code before players can connect — see the comment near the top of the file.';
-}
-
-// ---------- join reliability ----------
-// Firebase's SDK already retries the underlying connection on its own, so
-// unlike the old peer-to-peer version we don't need to tear the room down
-// and recreate it — just let the person know what's happening while we wait.
-let joinWatchTimer = null;
+// ---------- join reliability: auto-retry until we actually hear from a host ----------
+let joinRetryTimer = null;
+let joinAttempt = 0;
+let joinRoomIdInProgress = null;
 
 function attemptJoin(roomId) {
+  joinRoomIdInProgress = roomId;
+  joinAttempt = 1;
   els('lobbyPlayers').innerHTML = '';
-  els('lobbyWaitMsg').textContent = 'Connecting to the host…';
+  updateConnectingUI();
   connectToRoom(roomId, false);
   wireHostSlapListener();
-  clearTimeout(joinWatchTimer);
-  joinWatchTimer = setTimeout(() => {
-    if (state.isHost || state.players.length > 0) return; // already connected
-    els('lobbyWaitMsg').textContent = "Still waiting to hear from the host — double-check the room code, and make sure they've created the room.";
-  }, 7000);
+  armJoinTimeout(roomId);
+}
+
+function armJoinTimeout(roomId) {
+  clearTimeout(joinRetryTimer);
+  // back off a bit on each retry so we don't hammer the signaling server,
+  // but never give up on our own — keep trying until we connect.
+  const timeoutMs = Math.min(6000 + (joinAttempt - 1) * 2500, 15000);
+  joinRetryTimer = setTimeout(() => {
+    if (state.isHost || state.screen !== 'lobby') return; // left this flow already
+    if (state.players.length > 0) return; // we did connect, nothing to do
+    scheduleJoinRetry(roomId, null);
+  }, timeoutMs);
+}
+
+function scheduleJoinRetry(roomId, reasonNote) {
+  if (roomId !== joinRoomIdInProgress) return; // stale timer from an old attempt
+  try { state.room && state.room.leave && state.room.leave(); } catch (e) { /* ignore */ }
+  joinAttempt += 1;
+  updateConnectingUI(reasonNote);
+  connectToRoom(roomId, false);
+  wireHostSlapListener();
+  armJoinTimeout(roomId);
+}
+
+function updateConnectingUI(reasonNote) {
+  const msg = els('lobbyWaitMsg');
+  if (!msg) return;
+  if (joinAttempt <= 1) {
+    msg.textContent = 'Connecting to the host…';
+  } else if (joinAttempt <= 4) {
+    msg.textContent = `Still connecting… retrying (attempt ${joinAttempt}).`;
+  } else {
+    msg.textContent = `Still trying to connect (attempt ${joinAttempt})… this can take longer on some networks, but we'll keep retrying.`;
+  }
 }
 
 function markJoinConnected() {
-  clearTimeout(joinWatchTimer);
+  clearTimeout(joinRetryTimer);
+  joinRoomIdInProgress = null;
   const msg = els('lobbyWaitMsg');
   if (msg) msg.textContent = 'Waiting for the host to start the game…';
 }
@@ -917,7 +822,7 @@ function hostHandlePlayerLeftMidGame(peerId) {
 // this version, so send everyone back to start a fresh room rather than
 // leave them stuck waiting on a host that's gone.
 function handleHostLeft() {
-  clearTimeout(joinWatchTimer);
+  clearTimeout(joinRetryTimer);
   state.hand = [];
   state.incoming = null;
   state.outgoingBusy = false;
@@ -1079,7 +984,6 @@ function renderResults(standings) {
 els('btnCreate').addEventListener('click', () => {
   const name = els('nameInput').value.trim();
   if (!name) { flashJoinError('Type your name first.'); return; }
-  if (FIREBASE_NOT_CONFIGURED) { els('joinError').textContent = 'This game needs a Firebase config pasted into the code first — see the comment near the top of the file.'; return; }
   state.name = name;
   const code = randomCode();
   connectToRoom(code, true);
@@ -1091,7 +995,6 @@ els('btnJoin').addEventListener('click', () => {
   const code = els('joinCodeInput').value.trim().toUpperCase();
   if (!name) { flashJoinError('Type your name first.'); return; }
   if (code.length < 4) { flashJoinError('That room code looks too short.'); return; }
-  if (FIREBASE_NOT_CONFIGURED) { els('joinError').textContent = 'This game needs a Firebase config pasted into the code first — see the comment near the top of the file.'; return; }
   state.name = name;
   showScreen('lobby');
   els('lobbyCode').textContent = code;
