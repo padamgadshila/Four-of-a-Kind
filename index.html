@@ -345,7 +345,7 @@ function showScreen(name) {
   els('screen-' + name).classList.add('active');
 }
 
-function randomCode(len = 7) {
+function randomCode(len = 5) {
   let out = '';
   for (let i = 0; i < len; i++) out += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
   return out;
