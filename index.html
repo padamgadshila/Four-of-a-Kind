@@ -641,6 +641,7 @@ function handHasMatch(hand, cardsPerHand) {
 // ---------- dealing (shuffle) screen ----------
 function renderDealing(room) {
   els('turnGlow').classList.remove('show');
+  els('callBanner').style.display = 'none';
 
   const turnBanner = els('turnBanner');
   turnBanner.classList.remove('mine');
@@ -665,6 +666,7 @@ function renderDealing(room) {
   els('gameStatus').textContent = '';
 
   const btnShuffle = els('btnShuffle');
+  btnShuffle.disabled = false; // reset in case a previous round left it disabled
   const dealWaitMsg = els('dealWaitMsg');
   if (myState.isHost) {
     btnShuffle.style.display = 'block';
