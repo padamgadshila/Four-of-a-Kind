@@ -172,13 +172,21 @@
   /* ---- Game screen ---- */
   .table-top { width: 100%; display: flex; flex-direction: column; gap: 16px; align-items: center; }
 
-  .opponents { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; width: 100%; }
+  .opponents { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; width: 100%; }
   .opp-chip {
-    background: rgba(0,0,0,0.22); border-radius: 10px; padding: 8px 12px;
-    font-size: 0.85rem; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 2px;
-    min-width: 74px;
+    background: rgba(0,0,0,0.22); border-radius: 10px; padding: 6px 10px;
+    font-size: 0.78rem; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    min-width: 0; max-width: 92px; flex: 0 1 auto;
+    border: 2px solid transparent;
+    transition: outline 0.15s ease, transform 0.15s ease;
+  }
+  .opp-chip span:first-child {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
   }
   .opp-chip .rank-badge { font-family: 'Baloo 2'; color: var(--gold); font-weight: 700; }
+  @media (max-width: 400px) {
+    .opp-chip { font-size: 0.7rem; padding: 5px 8px; max-width: 76px; }
+  }
 
   .hand-area { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
   .card {
@@ -250,7 +258,44 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  .opp-chip.turn { outline: 2px solid var(--gold); }
+  .opp-chip.turn { outline: 2px solid var(--gold); transform: scale(1.06); box-shadow: 0 0 12px rgba(224,171,63,0.5); }
+
+  /* Whole-screen glow that turns on when it's your turn */
+  #turnGlow {
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background: radial-gradient(ellipse at 50% -10%, rgba(74,222,128,0.55) 0%, rgba(31,138,85,0.35) 45%, transparent 75%);
+    opacity: 0; transition: opacity 0.5s ease;
+  }
+  #turnGlow.show { opacity: 1; }
+
+  /* Face-down chit backs during the DEALING phase */
+  .card-back {
+    background: linear-gradient(135deg, var(--wood) 0%, var(--wood-dark) 100%);
+    color: var(--gold);
+    font-size: 1.8rem;
+    cursor: default;
+  }
+  .card-back:hover { transform: none; }
+  .hand-area.shuffling .card-back { animation: shuffleJitter 0.45s ease-in-out infinite; }
+  .hand-area.shuffling .card-back:nth-child(2n) { animation-delay: 0.08s; }
+  .hand-area.shuffling .card-back:nth-child(3n) { animation-delay: 0.16s; }
+  @keyframes shuffleJitter {
+    0%, 100% { transform: translateX(0) rotate(0deg); }
+    25% { transform: translateX(-5px) rotate(-4deg); }
+    75% { transform: translateX(5px) rotate(4deg); }
+  }
+
+  .card.sending-out {
+    animation: sendOut 0.28s ease forwards;
+    pointer-events: none;
+  }
+  @keyframes sendOut {
+    to { transform: translateY(-60px) scale(0.6); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hand-area.shuffling .card-back { animation: none; }
+    .card.sending-out { animation: none; opacity: 0.3; }
+  }
 
   /* ---- Results ---- */
   .standings { width: 100%; display: flex; flex-direction: column; gap: 10px; }
@@ -271,6 +316,7 @@
 </style>
 </head>
 <body>
+<div id="turnGlow"></div>
 <div id="app">
 
   <!-- JOIN SCREEN -->
@@ -323,7 +369,9 @@
       <h3 style="align-self:flex-start; margin-top:6px;">Your chits</h3>
       <div class="hand-area" id="handArea"></div>
       <div class="hint" id="handHint">Tap a chit to pass it to your right.</div>
-      <div class="slap-wrap">
+      <button class="btn btn-gold" id="btnShuffle" style="display:none;">🔀 Shuffle &amp; deal</button>
+      <div class="hint" id="dealWaitMsg" style="display:none;">Waiting for the host to shuffle and deal…</div>
+      <div class="slap-wrap" id="slapWrap">
         <button class="slap-btn" id="btnSlap" disabled>SLAP!</button>
       </div>
       <div class="status-line" id="gameStatus"></div>
@@ -378,13 +426,27 @@ const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
 const CARDS_PER_HAND_OPTIONS = [3, 4, 5, 6, 7, 8];
 const DEFAULT_CARDS_PER_HAND = 4;
 
+const OPP_COLORS = [
+  'rgba(59,130,246,0.35)',   // blue
+  'rgba(236,72,153,0.35)',   // pink
+  'rgba(168,85,247,0.35)',   // purple
+  'rgba(234,179,8,0.35)',    // amber
+  'rgba(20,184,166,0.35)',   // teal
+  'rgba(248,113,113,0.35)',  // red
+  'rgba(132,204,22,0.35)',   // lime
+  'rgba(99,102,241,0.35)',   // indigo
+];
+
 const myState = {
   name: '',
   roomCode: '',
   seat: null,
   isHost: false,
   unsubscribe: null,
-  sending: false,   // guards against double-tapping a card while a pass is in flight
+  sending: false,     // guards against double-tapping a card while a pass is in flight
+  lastHand: [],        // previous render's hand, used to spot a newly-received card
+  lastRenderedPhase: null,
+  lastAnimatedRound: 0,
 };
 
 function els(id) { return document.getElementById(id); }
@@ -392,6 +454,7 @@ function els(id) { return document.getElementById(id); }
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   els('screen-' + name).classList.add('active');
+  if (name !== 'game') els('turnGlow').classList.remove('show');
 }
 
 function escapeHtml(s) {
@@ -492,15 +555,29 @@ function subscribeToRoom(code) {
 function renderUI(room) {
   if (room.phase === 'LOBBY') {
     showScreen('lobby');
+    myState.lastRenderedPhase = 'LOBBY';
     renderLobby(room);
+  } else if (room.phase === 'DEALING') {
+    showScreen('game');
+    myState.lastRenderedPhase = 'DEALING';
+    renderDealing(room);
   } else if (room.phase === 'GAME') {
     showScreen('game');
-    renderGame(room);
+    if (myState.lastRenderedPhase === 'DEALING' && myState.lastAnimatedRound !== room.roundNumber) {
+      myState.lastAnimatedRound = room.roundNumber;
+      myState.lastRenderedPhase = 'GAME';
+      playDealAnimation(room);
+    } else {
+      myState.lastRenderedPhase = 'GAME';
+      renderGame(room);
+    }
   } else if (room.phase === 'RESULTS') {
     showScreen('results');
+    myState.lastRenderedPhase = 'RESULTS';
     renderResults(room);
   } else if (room.phase === 'ENDED') {
     showScreen('ended');
+    myState.lastRenderedPhase = 'ENDED';
     renderEnded(room);
   }
 }
@@ -554,15 +631,117 @@ async function handleStartGame() {
   }
 }
 
-function handHasFourOfKind(hand) {
-  if (!hand || hand.length < 4) return false;
+function handHasMatch(hand, cardsPerHand) {
+  if (!hand || hand.length < cardsPerHand) return false;
   const counts = {};
   for (const c of hand) counts[c] = (counts[c] || 0) + 1;
-  return Object.values(counts).some(n => n >= 4);
+  return Object.values(counts).some(n => n >= cardsPerHand);
+}
+
+// ---------- dealing (shuffle) screen ----------
+function renderDealing(room) {
+  els('turnGlow').classList.remove('show');
+
+  const turnBanner = els('turnBanner');
+  turnBanner.classList.remove('mine');
+  turnBanner.textContent = '🔀 Getting the deck ready…';
+
+  renderOpponentChips(room, -1); // -1: no one's "turn" yet
+
+  const cardsPerHand = room.cardsPerHand || DEFAULT_CARDS_PER_HAND;
+  const handArea = els('handArea');
+  handArea.classList.remove('shuffling');
+  handArea.innerHTML = '';
+  for (let i = 0; i < cardsPerHand; i++) {
+    const div = document.createElement('div');
+    div.className = 'card card-back';
+    div.textContent = '🂠';
+    handArea.appendChild(div);
+  }
+  myState.lastHand = [];
+
+  els('handHint').style.display = 'none';
+  els('slapWrap').style.display = 'none';
+  els('gameStatus').textContent = '';
+
+  const btnShuffle = els('btnShuffle');
+  const dealWaitMsg = els('dealWaitMsg');
+  if (myState.isHost) {
+    btnShuffle.style.display = 'block';
+    dealWaitMsg.style.display = 'none';
+  } else {
+    btnShuffle.style.display = 'none';
+    dealWaitMsg.style.display = 'block';
+  }
+}
+
+async function handleShuffle() {
+  if (!myState.isHost) return;
+  els('btnShuffle').disabled = true;
+  els('handArea').classList.add('shuffling');
+  try {
+    await client.mutation(api.game.dealCards, { code: myState.roomCode });
+  } catch (err) {
+    showToast(err.message || "Couldn't deal the cards", 3000);
+    els('btnShuffle').disabled = false;
+    els('handArea').classList.remove('shuffling');
+  }
+}
+
+// Plays a brief shuffle-then-reveal sequence the first time a round's
+// cards land, then hands off to the normal renderGame.
+function playDealAnimation(room) {
+  const handArea = els('handArea');
+  handArea.classList.add('shuffling');
+
+  const hand = room.hands[myState.seat] || [];
+  const backs = Array.from(handArea.querySelectorAll('.card-back'));
+  // Make sure there's one back per card (covers e.g. late joiners).
+  while (backs.length < hand.length) {
+    const div = document.createElement('div');
+    div.className = 'card card-back';
+    div.textContent = '🂠';
+    handArea.appendChild(div);
+    backs.push(div);
+  }
+
+  setTimeout(() => {
+    handArea.classList.remove('shuffling');
+    hand.forEach((card, idx) => {
+      setTimeout(() => {
+        const el = backs[idx];
+        if (!el) return;
+        el.classList.remove('card-back');
+        el.classList.add('incoming');
+        el.textContent = card;
+      }, idx * 130);
+    });
+
+    setTimeout(() => {
+      myState.lastHand = hand.slice();
+      renderGame(room);
+    }, 500 + hand.length * 130);
+  }, 500);
+}
+
+function renderOpponentChips(room, activeSeat) {
+  const opp = els('opponents');
+  opp.innerHTML = '';
+  room.players.filter(p => p.seat !== myState.seat).forEach(p => {
+    const chip = document.createElement('div');
+    const isTurn = p.seat === activeSeat;
+    chip.className = 'opp-chip' + (isTurn ? ' turn' : '');
+    chip.style.background = OPP_COLORS[p.seat % OPP_COLORS.length];
+    const rankIdx = room.standings.indexOf(p.name);
+    chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rankIdx >= 0 ? `<span class="rank-badge">#${rankIdx + 1}</span>` : '<span>🎴 in play</span>');
+    opp.appendChild(chip);
+  });
 }
 
 function renderGame(room) {
   const isMyTurn = room.currentTurnSeat === myState.seat;
+  els('turnGlow').classList.toggle('show', isMyTurn);
+
   const turnBanner = els('turnBanner');
   if (isMyTurn) {
     turnBanner.textContent = "🫵 It's your turn — send a chit!";
@@ -573,29 +752,32 @@ function renderGame(room) {
     turnBanner.classList.remove('mine');
   }
 
-  const opp = els('opponents');
-  opp.innerHTML = '';
-  room.players.filter(p => p.seat !== myState.seat).forEach(p => {
-    const chip = document.createElement('div');
-    chip.className = 'opp-chip' + (p.seat === room.currentTurnSeat ? ' turn' : '');
-    const rankIdx = room.standings.indexOf(p.name);
-    chip.innerHTML = `<span>${escapeHtml(p.name)}</span>` + (rankIdx >= 0 ? `<span class="rank-badge">#${rankIdx + 1}</span>` : '<span>🎴 in play</span>');
-    opp.appendChild(chip);
-  });
+  renderOpponentChips(room, room.currentTurnSeat);
 
+  const cardsPerHand = room.cardsPerHand || DEFAULT_CARDS_PER_HAND;
   const hand = room.hands[myState.seat] || [];
+  const justReceived = hand.length > myState.lastHand.length;
+
   const handArea = els('handArea');
+  handArea.classList.remove('shuffling');
   handArea.innerHTML = '';
   const canAct = isMyTurn && !myState.sending;
   hand.forEach((card, idx) => {
     const div = document.createElement('div');
-    div.className = 'card' + (!canAct ? ' pending' : '');
+    const isNewest = justReceived && idx === hand.length - 1;
+    div.className = 'card' + (!canAct ? ' pending' : '') + (isNewest ? ' incoming' : '');
     div.textContent = card;
-    if (canAct) div.onclick = () => handlePassCard(idx);
+    if (canAct) div.onclick = () => handlePassCard(idx, div);
     handArea.appendChild(div);
   });
+  myState.lastHand = hand.slice();
+
+  els('btnShuffle').style.display = 'none';
+  els('dealWaitMsg').style.display = 'none';
+  els('slapWrap').style.display = 'flex';
 
   const handHint = els('handHint');
+  handHint.style.display = 'block';
   if (myState.sending) {
     handHint.textContent = 'Sending your chit along…';
   } else if (isMyTurn) {
@@ -611,7 +793,7 @@ function renderGame(room) {
   const iAlreadySlapped = room.standings.includes(myState.name);
   if (room.slapCalled && !iAlreadySlapped) {
     callBanner.style.display = 'block';
-    callBanner.textContent = '🚨 Someone got four! SLAM the button now!';
+    callBanner.textContent = '🚨 Someone got a match! SLAM the button now!';
   } else {
     callBanner.style.display = 'none';
   }
@@ -627,7 +809,7 @@ function renderGame(room) {
     slapBtn.textContent = 'SLAP!';
     slapBtn.classList.add('scramble');
     slapBtn.classList.remove('ready');
-  } else if (handHasFourOfKind(hand)) {
+  } else if (handHasMatch(hand, cardsPerHand)) {
     slapBtn.disabled = false;
     slapBtn.textContent = 'SLAP!';
     slapBtn.classList.add('ready');
@@ -641,22 +823,29 @@ function renderGame(room) {
   const roundLabel = room.roundNumber ? `Round ${room.roundNumber} • ` : '';
   els('gameStatus').textContent = room.standings.length > 0
     ? `${roundLabel}${room.standings.length}/${room.players.length} players have slapped`
-    : `${roundLabel}${room.cardsPerHand || DEFAULT_CARDS_PER_HAND} cards per hand`;
+    : `${roundLabel}${cardsPerHand} cards per hand — match all ${cardsPerHand} to slap`;
 }
 
-async function handlePassCard(cardIndex) {
+async function handlePassCard(cardIndex, cardEl) {
   if (myState.sending) return;
   myState.sending = true;
-  try {
-    await client.mutation(api.game.passCard, {
-      code: myState.roomCode,
-      playerSeat: myState.seat,
-      cardIndex,
-    });
-  } catch (err) {
-    showToast(err.message || "Couldn't pass that card", 2500);
-  }
-  myState.sending = false;
+  if (cardEl) cardEl.classList.add('sending-out');
+
+  const send = async () => {
+    try {
+      await client.mutation(api.game.passCard, {
+        code: myState.roomCode,
+        playerSeat: myState.seat,
+        cardIndex,
+      });
+    } catch (err) {
+      showToast(err.message || "Couldn't pass that card", 2500);
+    }
+    myState.sending = false;
+  };
+
+  // Let the little "sent" animation play before the hand re-renders.
+  if (cardEl) setTimeout(send, 220); else send();
 }
 
 async function handleSlap() {
@@ -722,8 +911,8 @@ async function handleEndGame() {
 }
 
 function renderEnded(room) {
-  // Lowest cumulative total wins (golf-style scoring).
-  const ranked = Object.entries(room.totalScores || {}).sort((a, b) => a[1] - b[1]);
+  // Highest cumulative total wins (1st place earns the most points each round).
+  const ranked = Object.entries(room.totalScores || {}).sort((a, b) => b[1] - a[1]);
   const orderedNames = ranked.map(([name]) => name);
   // Include anyone with no score yet (shouldn't normally happen) at the end.
   room.players.forEach(p => { if (!orderedNames.includes(p.name)) orderedNames.push(p.name); });
@@ -754,6 +943,7 @@ async function handleNewGame() {
 els('btnCreate').addEventListener('click', handleCreateRoom);
 els('btnJoin').addEventListener('click', handleJoinRoom);
 els('btnStart').addEventListener('click', handleStartGame);
+els('btnShuffle').addEventListener('click', handleShuffle);
 els('btnSlap').addEventListener('click', handleSlap);
 els('btnPlayAgain').addEventListener('click', handlePlayAgain);
 els('btnEndGame').addEventListener('click', handleEndGame);
